@@ -56,15 +56,41 @@ export function maskThreadId(threadId?: string): string {
   return `${threadId.slice(0, 4)}...${threadId.slice(-4)}`;
 }
 
+function sanitizeSessionPreview(input?: string): string | undefined {
+  if (!input) {
+    return undefined;
+  }
+  const cleaned = input
+    .replace(/^\[飞书[^\]]+\]\s*/u, '')
+    .replace(/\s*\[飞书消息元数据\][\s\S]*$/u, '')
+    .replace(/\bfeishu_[a-z_]+=\S+/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) {
+    return undefined;
+  }
+  return cleaned.length <= 120 ? cleaned : `${cleaned.slice(0, 120).trimEnd()}...`;
+}
+
+function shouldHideSessionFromList(threadId?: string): boolean {
+  const normalized = (threadId ?? '').trim();
+  return normalized.startsWith('<') && normalized.endsWith('>');
+}
+
 function formatSessions(currentThreadId: string | undefined, sessions: SessionListItem[]): string {
   if (sessions.length === 0) {
     return '当前 agent 没有历史会话。先发一条普通消息开始对话。';
   }
-  const lines = sessions.map((session, idx) => {
+  const lines = sessions.flatMap((session, idx) => {
+    if (shouldHideSessionFromList(session.threadId)) {
+      return [];
+    }
     const marker = session.threadId === currentThreadId ? '👉' : '  ';
-    const title = session.name ?? `会话 ${idx + 1}`;
-    const preview = session.lastPrompt ? ` - ${session.lastPrompt}` : '';
-    return `${marker} ${idx + 1}. ${title} (${maskThreadId(session.threadId)})${preview}`;
+    const title = session.name ?? session.summary ?? `会话 ${idx + 1}`;
+    const previewSource = sanitizeSessionPreview(session.lastPrompt);
+    const previewText = previewSource && previewSource !== title ? previewSource : '';
+    const preview = previewText ? ` - ${previewText}` : '';
+    return [`${marker} ${idx + 1}. ${title} (${maskThreadId(session.threadId)})${preview}`];
   });
   return ['会话列表（当前 agent，最近优先）：', ...lines, '使用 /switch <编号> 切换会话。'].join('\n');
 }

@@ -290,6 +290,44 @@ describe('buildFeishuOpenCodeInputFallbackMessage', () => {
   });
 });
 
+describe('formatCommandOutboundMessage', () => {
+  it('keeps original session numbering in feishu session switch buttons', () => {
+    const payload = formatCommandOutboundMessage(
+      'feishu',
+      '/sessions',
+      [
+        '会话列表（当前 agent，最近优先）：',
+        '👉 1. 飞书富文本修改与路径确认 (019d...ea53) - 1. 有一些是我之前的修改',
+        '   2. 确认对方是否还在线 (019d...7532) - 活着的吗？',
+        '   12. OpenClaw使用流程调研 (019d...e6d3) - 给我调研一下 openclaw 的使用流程',
+        '使用 /switch <编号> 切换会话。',
+      ].join('\n'),
+    );
+
+    const buttons = extractButtons(getCardElements(payload));
+    expect(buttons.some((item) => item.text?.content?.startsWith('1. '))).toBe(true);
+    expect(buttons.some((item) => item.text?.content?.startsWith('2. '))).toBe(true);
+    expect(buttons.some((item) => item.text?.content?.startsWith('12. '))).toBe(true);
+    expect(buttons.some((item) => item.value?.gateway_cmd === '/switch 12' || item.value?.command === '/switch 12')).toBe(true);
+  });
+
+  it('keeps numbering in the current session field summary', () => {
+    const payload = formatCommandOutboundMessage(
+      'feishu',
+      '/sessions',
+      [
+        '会话列表（当前 agent，最近优先）：',
+        '👉 2. 确认对方是否还在线 (019d...7532) - 活着的吗？',
+        '   12. OpenClaw使用流程调研 (019d...e6d3) - 给我调研一下 openclaw 的使用流程',
+        '使用 /switch <编号> 切换会话。',
+      ].join('\n'),
+    );
+
+    const markdown = JSON.stringify(getCardElements(payload));
+    expect(markdown).toContain('**当前会话**\\n2. 确认对方是否还在线');
+  });
+});
+
 describe('auth result and personal auth cards', () => {
   it('renders api login success as a conclusion-first card with a next step action', () => {
     const payload = buildFeishuApiLoginResultMessage({

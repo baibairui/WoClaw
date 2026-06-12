@@ -1,0 +1,6 @@
+interface:
+  display_name: "Lark CLI"
+  short_description: "Operate Feishu/Lark through the official larksuite/cli tool."
+  default_prompt: "Use $lark-cli when the user needs a real Feishu/Lark action. Prefer official lark-cli shortcuts such as docs +create/+update, calendar +agenda/+create, task +create/+get-my-tasks, and wiki commands. Do not use feishu-canvas or the old local Feishu scripts."
+policy:
+  allow_implicit_invocation: true

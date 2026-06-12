@@ -1,0 +1,6 @@
+interface:
+  display_name: "macOS GUI Skill"
+  short_description: "Operate desktop applications through screenshot-guided local GUI actions."
+  default_prompt: "Use $macos-gui-skill when the user wants desktop app operations."
+policy:
+  allow_implicit_invocation: true

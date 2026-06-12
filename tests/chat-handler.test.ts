@@ -62,6 +62,7 @@ function createSessionStore() {
   const threads = new Map<string, string>();
   const modelOverrides = new Map<string, string>();
   const providerOverrides = new Map<string, 'codex' | 'opencode'>();
+  const activities: Array<{ threadId: string; role: 'user' | 'assistant'; text?: string }> = [];
   const agents = new Map<string, Array<{
     agentId: string;
     name: string;
@@ -161,6 +162,10 @@ function createSessionStore() {
     renameSession() {
       return true;
     },
+    recordSessionActivity(threadId: string, input: { role: 'user' | 'assistant'; text?: string }) {
+      activities.push({ threadId, role: input.role, text: input.text });
+    },
+    __activities: activities,
   };
 }
 
@@ -2587,8 +2592,19 @@ local_audio_path=${sourcePath}`,
     const sessionStore = createSessionStore();
     sessionStore.setSession('u1', 'default', 'thread_1');
     sessionStore.listDetailed = () => ([
-      { threadId: 'thread_1', name: '当前会话', lastPrompt: 'hello', updatedAt: Date.now() },
-      { threadId: 'thread_2', name: '历史会话', lastPrompt: 'world', updatedAt: Date.now() - 1 },
+      {
+        threadId: 'thread_1',
+        name: '当前会话',
+        summary: '修复飞书 session 卡片',
+        lastPrompt: 'hello',
+        updatedAt: Date.now(),
+      },
+      {
+        threadId: 'thread_2',
+        summary: '补充 README 文档',
+        lastPrompt: 'world',
+        updatedAt: Date.now() - 1,
+      },
     ]);
     const handler = createChatHandler({
       sessionStore,
@@ -2630,8 +2646,43 @@ local_audio_path=${sourcePath}`,
     expect(switchCurrent?.type).toBe('primary');
     expect(switchCurrent?.text?.content).toContain('当前会话');
     expect(switchCurrent?.text?.content).toContain('hello');
-    expect(switchOther?.text?.content).toContain('历史会话');
+    expect(switchOther?.text?.content).toContain('补充 README 文档');
     expect(switchOther?.text?.content).toContain('world');
+  });
+
+  it('records assistant activity after a normal reply completes', async () => {
+    const sendText = vi.fn(async () => undefined);
+    const sessionStore = createSessionStore();
+    sessionStore.setSession('u1', 'default', 'thread_existing');
+    const handler = createChatHandler({
+      sessionStore,
+      rateLimitStore: { allow: () => true },
+      codexRunner: {
+        run: async () => ({ threadId: 'thread_existing', rawOutput: '最终回复内容' }),
+        review: async () => ({ rawOutput: '' }),
+      },
+      agentWorkspaceManager: {
+        createWorkspace: () => ({ agentId: 'a1', workspaceDir: '/tmp/a1' }),
+        isSharedMemoryEmpty: () => false,
+      },
+      runnerEnabled: true,
+      defaultSearch: false,
+      reminderDbPath: '/tmp/reminders.db',
+      sendText,
+    });
+
+    await handler({ channel: 'feishu', userId: 'u1', content: '继续修复 session summary' });
+
+    expect(sessionStore.__activities).toContainEqual(expect.objectContaining({
+      threadId: 'thread_existing',
+      role: 'user',
+      text: '继续修复 session summary',
+    }));
+    expect(sessionStore.__activities).toContainEqual(expect.objectContaining({
+      threadId: 'thread_existing',
+      role: 'assistant',
+      text: '最终回复内容',
+    }));
   });
 
   it('renders agents command card with switch buttons', async () => {

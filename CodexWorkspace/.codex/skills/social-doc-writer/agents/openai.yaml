@@ -1,0 +1,6 @@
+interface:
+  display_name: "Social Doc Writer"
+  short_description: "Turn research findings into Feishu documents."
+  default_prompt: "Use $social-doc-writer for this task."
+policy:
+  allow_implicit_invocation: true

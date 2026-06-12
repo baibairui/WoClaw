@@ -1,0 +1,6 @@
+interface:
+  display_name: "X Research"
+  short_description: "Research public X/Twitter content."
+  default_prompt: "Use $x-research for this task."
+policy:
+  allow_implicit_invocation: true

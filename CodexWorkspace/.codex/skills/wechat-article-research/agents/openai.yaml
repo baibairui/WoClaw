@@ -1,0 +1,6 @@
+interface:
+  display_name: "WeChat Article Research"
+  short_description: "Research public WeChat articles."
+  default_prompt: "Use $wechat-article-research for this task."
+policy:
+  allow_implicit_invocation: true

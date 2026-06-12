@@ -1,0 +1,6 @@
+interface:
+  display_name: "Xiaohongshu Research"
+  short_description: "Research public Xiaohongshu content."
+  default_prompt: "Use $xiaohongshu-research for this task."
+policy:
+  allow_implicit_invocation: true

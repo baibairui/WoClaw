@@ -32,8 +32,19 @@ const context = {
     },
   ],
   sessions: [
-    { threadId: 'thread_aabbccdd0011', name: '当前任务', lastPrompt: '修复回调签名错误', updatedAt: 1 },
-    { threadId: 'thread_223344556677', lastPrompt: '补充 README', updatedAt: 1 },
+    {
+      threadId: 'thread_aabbccdd0011',
+      name: '当前任务',
+      summary: '修复飞书卡片展示',
+      lastPrompt: '修复回调签名错误',
+      updatedAt: 1,
+    },
+    {
+      threadId: 'thread_223344556677',
+      summary: '补充 README 文档',
+      lastPrompt: '补充 README',
+      updatedAt: 1,
+    },
   ],
 };
 
@@ -93,7 +104,61 @@ describe('handleUserCommand', () => {
     expect(result.handled).toBe(true);
     expect(result.message).toContain('会话列表');
     expect(result.message).toContain('当前任务');
+    expect(result.message).toContain('补充 README 文档');
+    expect(result.message).not.toContain('会话 2');
     expect(result.message).toContain('/switch <编号>');
+  });
+
+  it('cleans noisy feishu preview text in /sessions output', () => {
+    const noisy = handleUserCommand('/sessions', {
+      ...context,
+      sessions: [
+        {
+          threadId: 'thread_noisy_00112233',
+          summary: '飞书富文本修改与路径确认',
+          lastPrompt:
+            '[飞书富文本] 1. 有一些是我之前的修改 2. 路径在哪里 [飞书消息元数据] feishu_message_type=post feishu_summary=abc',
+          updatedAt: 1,
+        },
+      ],
+    });
+
+    expect(noisy.message).toContain('飞书富文本修改与路径确认');
+    expect(noisy.message).toContain('1. 有一些是我之前的修改 2. 路径在哪里');
+    expect(noisy.message).not.toContain('[飞书富文本]');
+    expect(noisy.message).not.toContain('[飞书消息元数据]');
+    expect(noisy.message).not.toContain('feishu_message_type=');
+  });
+
+  it('hides placeholder sessions but keeps original numbering', () => {
+    const hiddenPlaceholder = handleUserCommand('/sessions', {
+      ...context,
+      sessions: [
+        {
+          threadId: 'thread_real_001',
+          summary: '第一个正常会话',
+          lastPrompt: 'A',
+          updatedAt: 3,
+        },
+        {
+          threadId: '<编号|threadId>',
+          summary: '脏占位会话',
+          lastPrompt: 'B',
+          updatedAt: 2,
+        },
+        {
+          threadId: 'thread_real_003',
+          summary: '第三个正常会话',
+          lastPrompt: 'C',
+          updatedAt: 1,
+        },
+      ],
+    });
+
+    expect(hiddenPlaceholder.message).toContain('1. 第一个正常会话');
+    expect(hiddenPlaceholder.message).toContain('3. 第三个正常会话');
+    expect(hiddenPlaceholder.message).not.toContain('2. 脏占位会话');
+    expect(hiddenPlaceholder.message).not.toContain('<编号|threadId>');
   });
 
   it('supports /agents and /agent current', () => {

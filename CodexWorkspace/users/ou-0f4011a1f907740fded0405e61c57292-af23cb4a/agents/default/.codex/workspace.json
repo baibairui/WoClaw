@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "kind": "agent",
+  "agentId": "default",
+  "agentName": "默认Agent",
+  "template": "default"
+}

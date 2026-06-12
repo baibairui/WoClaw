@@ -1,0 +1,6 @@
+interface:
+  display_name: "Reminder Tool"
+  short_description: "Create durable chat reminders with the reminder-tool skill."
+  default_prompt: "Use $reminder-tool to create a reminder for this chat."
+policy:
+  allow_implicit_invocation: true

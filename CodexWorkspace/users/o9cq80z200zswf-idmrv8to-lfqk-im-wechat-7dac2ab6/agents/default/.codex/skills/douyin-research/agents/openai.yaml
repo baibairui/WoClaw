@@ -1,0 +1,6 @@
+interface:
+  display_name: "Douyin Research"
+  short_description: "Research public Douyin content."
+  default_prompt: "Use $douyin-research for this task."
+policy:
+  allow_implicit_invocation: true

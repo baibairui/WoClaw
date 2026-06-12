@@ -1,0 +1,6 @@
+interface:
+  display_name: "Social Intel"
+  short_description: "Collect public social research evidence across platforms."
+  default_prompt: "Use $social-intel for this task."
+policy:
+  allow_implicit_invocation: true

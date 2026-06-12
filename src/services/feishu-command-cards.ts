@@ -396,6 +396,10 @@ function stripListMarker(line: string): string {
   return line.replace(/^👉\s+/, '').replace(/^\d+\.\s+/, '').trim();
 }
 
+function stripSelectionMarker(line: string): string {
+  return line.replace(/^👉\s+/, '').trim();
+}
+
 function extractCurrentModelName(currentLine: string | undefined): string | undefined {
   if (!currentLine) {
     return undefined;
@@ -443,7 +447,7 @@ function buildSessionsCardElements(text: string): Array<Record<string, unknown>>
   if (indexed.length > 0) {
     elements.push(buildFeishuFieldGrid([
       { label: '会话数量', value: String(indexed.length) },
-      { label: '当前会话', value: currentSession ? stripListMarker(currentSession) : '未标记' },
+      { label: '当前会话', value: currentSession ? stripSelectionMarker(currentSession) : '未标记' },
       { label: '可执行操作', value: '切换 / 重命名' },
     ]));
   }
@@ -466,7 +470,7 @@ function buildSessionButtons(lines: string[]): FeishuCardButton[] {
       const body = match[2] ?? '';
       const title = body.split(' (')[0]?.trim() ?? body.trim();
       const preview = body.match(/\)\s*-\s*(.+)$/)?.[1]?.trim() ?? '';
-      const labelText = preview ? `${title} · ${preview}` : title;
+      const labelText = preview ? `${index}. ${title} · ${preview}` : `${index}. ${title}`;
       const label = truncateCardButtonLabel(labelText || `会话 ${index}`, 26);
       buttons.push({
         label,

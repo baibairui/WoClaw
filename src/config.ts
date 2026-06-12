@@ -159,6 +159,8 @@ export const config = {
   runnerEnabled: process.env.RUNNER_ENABLED !== 'false',
   memoryStewardEnabled: process.env.MEMORY_STEWARD_ENABLED !== 'false',
   memoryStewardIntervalHours: optionalNumber('MEMORY_STEWARD_INTERVAL_HOURS', 1),
+  sessionSummaryStewardEnabled: process.env.SESSION_SUMMARY_STEWARD_ENABLED !== 'false',
+  sessionSummaryStewardIntervalMinutes: optionalNumber('SESSION_SUMMARY_STEWARD_INTERVAL_MINUTES', 10),
   openAiCompat: (() => {
     const upstreamBaseUrl = normalizeBaseUrl(optionalStringUndefined('OPENAI_COMPAT_UPSTREAM_BASE_URL'));
     const upstreamApiKey = optionalStringUndefined('OPENAI_COMPAT_UPSTREAM_API_KEY');

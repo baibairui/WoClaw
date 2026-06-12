@@ -1,0 +1,6 @@
+interface:
+  display_name: "Gateway Browser"
+  short_description: "Operate the gateway-owned browser through the gateway-browser skill."
+  default_prompt: "Use $gateway-browser when the user wants browser operations."
+policy:
+  allow_implicit_invocation: true

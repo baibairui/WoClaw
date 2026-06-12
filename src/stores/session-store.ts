@@ -11,8 +11,23 @@ const HIDDEN_AGENT_NAMES = new Set(['记忆初始化引导']);
 export interface SessionListItem {
   threadId: string;
   name?: string;
+  summary?: string;
+  summaryState?: string;
+  summarySource?: string;
   lastPrompt?: string;
+  userTurnsSinceSummary?: number;
+  charsSinceSummary?: number;
   updatedAt: number;
+}
+
+export interface SessionSummaryCandidate {
+  threadId: string;
+  summary?: string;
+  lastPrompt?: string;
+  summaryState: string;
+  lastUserMsgAt?: number;
+  userTurnsSinceSummary: number;
+  charsSinceSummary: number;
 }
 
 export interface SessionState {
@@ -371,7 +386,12 @@ export class SessionStore {
         SELECT
           h.thread_id AS threadId,
           m.name AS name,
+          m.summary AS summary,
+          m.summary_state AS summaryState,
+          m.summary_source AS summarySource,
           m.last_prompt AS lastPrompt,
+          m.user_turns_since_summary AS userTurnsSinceSummary,
+          m.chars_since_summary AS charsSinceSummary,
           COALESCE(m.updated_at, h.updated_at) AS updatedAt
         FROM user_agent_history h
         LEFT JOIN session_meta m ON m.thread_id = h.thread_id
@@ -410,14 +430,179 @@ export class SessionStore {
     }
     this.db
       .prepare(`
-        INSERT INTO session_meta(thread_id, name, last_prompt, updated_at)
-        VALUES(?, ?, NULL, ?)
+        INSERT INTO session_meta(thread_id, name, summary_state, summary_source, last_prompt, updated_at)
+        VALUES(?, ?, 'manual_locked', 'manual', NULL, ?)
         ON CONFLICT(thread_id) DO UPDATE SET
           name = excluded.name,
+          summary_state = excluded.summary_state,
+          summary_source = excluded.summary_source,
           updated_at = excluded.updated_at
       `)
       .run(targetThreadId, normalized, this.nextTimestamp());
     return true;
+  }
+
+  recordSessionActivity(
+    threadId: string,
+    input: {
+      role: 'user' | 'assistant';
+      text?: string;
+      timestamp?: number;
+    },
+  ): void {
+    const now = input.timestamp ?? this.nextTimestamp();
+    const normalizedText = (input.text ?? '').trim();
+    const charCount = normalizedText.length;
+    const userTurnIncrement = input.role === 'user' ? 1 : 0;
+    this.db
+      .prepare(`
+        INSERT INTO session_meta(
+          thread_id,
+          name,
+          summary,
+          summary_state,
+          summary_source,
+          last_user_msg_at,
+          last_assistant_msg_at,
+          user_turns_since_summary,
+          chars_since_summary,
+          last_prompt,
+          updated_at
+        )
+        VALUES(?, NULL, NULL, 'pending_init', NULL, ?, ?, ?, ?, NULL, ?)
+        ON CONFLICT(thread_id) DO UPDATE SET
+          last_user_msg_at = CASE
+            WHEN ? = 'user' THEN ?
+            ELSE session_meta.last_user_msg_at
+          END,
+          last_assistant_msg_at = CASE
+            WHEN ? = 'assistant' THEN ?
+            ELSE session_meta.last_assistant_msg_at
+          END,
+          user_turns_since_summary = session_meta.user_turns_since_summary + ?,
+          chars_since_summary = session_meta.chars_since_summary + ?,
+          summary_state = CASE
+            WHEN session_meta.summary_state = 'manual_locked' THEN session_meta.summary_state
+            WHEN (
+              session_meta.summary_state = 'pending_init'
+              AND (
+                session_meta.user_turns_since_summary + ? >= 2
+                OR session_meta.chars_since_summary + ? >= 300
+              )
+            ) THEN 'dirty'
+            WHEN (
+              session_meta.summary_state = 'stable'
+              AND (
+                session_meta.user_turns_since_summary + ? >= 3
+                OR session_meta.chars_since_summary + ? >= 800
+              )
+            ) THEN 'dirty'
+            ELSE session_meta.summary_state
+          END,
+          updated_at = ?
+      `)
+      .run(
+        threadId,
+        input.role === 'user' ? now : null,
+        input.role === 'assistant' ? now : null,
+        userTurnIncrement,
+        charCount,
+        now,
+        input.role,
+        now,
+        input.role,
+        now,
+        userTurnIncrement,
+        charCount,
+        userTurnIncrement,
+        charCount,
+        userTurnIncrement,
+        charCount,
+        now,
+      );
+  }
+
+  listSummaryCandidates(input: {
+    now?: number;
+    quietWindowMs?: number;
+    limit?: number;
+  } = {}): SessionSummaryCandidate[] {
+    const now = input.now ?? Date.now();
+    const quietBefore = now - (input.quietWindowMs ?? 60_000);
+    const limit = input.limit ?? 20;
+    const rows = this.db
+      .prepare(`
+        SELECT
+          thread_id AS threadId,
+          summary,
+          last_prompt AS lastPrompt,
+          summary_state AS summaryState,
+          last_user_msg_at AS lastUserMsgAt,
+          user_turns_since_summary AS userTurnsSinceSummary,
+          chars_since_summary AS charsSinceSummary
+        FROM session_meta
+        WHERE summary_state IN ('pending_init', 'dirty')
+          AND (last_user_msg_at IS NULL OR last_user_msg_at <= ?)
+          AND (
+            (summary_state = 'pending_init' AND (user_turns_since_summary >= 2 OR chars_since_summary >= 300))
+            OR
+            (summary_state = 'dirty' AND (user_turns_since_summary >= 2 OR chars_since_summary >= 300))
+          )
+        ORDER BY COALESCE(last_user_msg_at, updated_at) DESC
+        LIMIT ?
+      `)
+      .all(quietBefore, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      threadId: String(row.threadId ?? ''),
+      summary: typeof row.summary === 'string' ? row.summary : undefined,
+      lastPrompt: typeof row.lastPrompt === 'string' ? row.lastPrompt : undefined,
+      summaryState: typeof row.summaryState === 'string' ? row.summaryState : 'pending_init',
+      lastUserMsgAt: typeof row.lastUserMsgAt === 'number' ? row.lastUserMsgAt : undefined,
+      userTurnsSinceSummary: typeof row.userTurnsSinceSummary === 'number' ? row.userTurnsSinceSummary : 0,
+      charsSinceSummary: typeof row.charsSinceSummary === 'number' ? row.charsSinceSummary : 0,
+    }));
+  }
+
+  updateSessionSummary(
+    threadId: string,
+    input: {
+      summary: string;
+      source?: 'llm' | 'seed' | 'manual';
+      state?: 'stable' | 'dirty' | 'pending_init' | 'manual_locked';
+      timestamp?: number;
+    },
+  ): void {
+    const now = input.timestamp ?? this.nextTimestamp();
+    this.db
+      .prepare(`
+        UPDATE session_meta
+        SET
+          summary = ?,
+          summary_source = ?,
+          summary_state = ?,
+          summary_updated_at = ?,
+          user_turns_since_summary = 0,
+          chars_since_summary = 0,
+          summary_error_count = 0,
+          summary_refresh_after = NULL,
+          updated_at = ?
+        WHERE thread_id = ?
+      `)
+      .run(input.summary.trim(), input.source ?? 'llm', input.state ?? 'stable', now, now, threadId);
+  }
+
+  markSummaryRefreshFailed(threadId: string, retryAt?: number): void {
+    this.db
+      .prepare(`
+        UPDATE session_meta
+        SET
+          summary_state = 'dirty',
+          summary_error_count = summary_error_count + 1,
+          summary_refresh_after = ?,
+          updated_at = ?
+        WHERE thread_id = ?
+      `)
+      .run(retryAt ?? null, this.nextTimestamp(), threadId);
   }
 
   private ensureSchema(): void {
@@ -442,6 +627,16 @@ export class SessionStore {
       CREATE TABLE IF NOT EXISTS session_meta (
         thread_id TEXT PRIMARY KEY,
         name TEXT,
+        summary TEXT,
+        summary_state TEXT NOT NULL DEFAULT 'pending_init',
+        summary_source TEXT,
+        summary_updated_at INTEGER,
+        last_user_msg_at INTEGER,
+        last_assistant_msg_at INTEGER,
+        user_turns_since_summary INTEGER NOT NULL DEFAULT 0,
+        chars_since_summary INTEGER NOT NULL DEFAULT 0,
+        summary_refresh_after INTEGER,
+        summary_error_count INTEGER NOT NULL DEFAULT 0,
         last_prompt TEXT,
         updated_at INTEGER NOT NULL
       );
@@ -495,6 +690,17 @@ export class SessionStore {
     this.ensureColumn('user_session', 'bound_identity_version', 'TEXT');
     this.ensureColumn('user_agent_session', 'bound_identity_version', 'TEXT');
     this.ensureColumn('user_agent_settings', 'provider_override', 'TEXT');
+    this.ensureColumn('session_meta', 'summary', 'TEXT');
+    this.ensureColumn('session_meta', 'summary_state', "TEXT NOT NULL DEFAULT 'pending_init'");
+    this.ensureColumn('session_meta', 'summary_source', 'TEXT');
+    this.ensureColumn('session_meta', 'summary_updated_at', 'INTEGER');
+    this.ensureColumn('session_meta', 'last_user_msg_at', 'INTEGER');
+    this.ensureColumn('session_meta', 'last_assistant_msg_at', 'INTEGER');
+    this.ensureColumn('session_meta', 'user_turns_since_summary', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('session_meta', 'chars_since_summary', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('session_meta', 'summary_refresh_after', 'INTEGER');
+    this.ensureColumn('session_meta', 'summary_error_count', 'INTEGER NOT NULL DEFAULT 0');
+    this.backfillLegacySessionSummaries();
   }
 
   private getCustomAgent(userId: string, agentId: string): AgentRecord | undefined {
@@ -557,7 +763,12 @@ export class SessionStore {
         SELECT
           h.thread_id AS threadId,
           m.name AS name,
+          m.summary AS summary,
+          m.summary_state AS summaryState,
+          m.summary_source AS summarySource,
           m.last_prompt AS lastPrompt,
+          m.user_turns_since_summary AS userTurnsSinceSummary,
+          m.chars_since_summary AS charsSinceSummary,
           COALESCE(m.updated_at, h.updated_at) AS updatedAt
         FROM user_history h
         LEFT JOIN session_meta m ON m.thread_id = h.thread_id
@@ -616,22 +827,39 @@ export class SessionStore {
   private upsertSessionMeta(threadId: string, lastPrompt: string | undefined, now: number): void {
     const normalizedPrompt = normalizePreview(lastPrompt);
     if (normalizedPrompt) {
+      const seedSummary = buildSeedSummary(normalizedPrompt);
       this.db
         .prepare(`
-          INSERT INTO session_meta(thread_id, name, last_prompt, updated_at)
-          VALUES(?, NULL, ?, ?)
+          INSERT INTO session_meta(
+            thread_id,
+            name,
+            summary,
+            summary_state,
+            summary_source,
+            last_prompt,
+            updated_at
+          )
+          VALUES(?, NULL, ?, 'pending_init', 'seed', ?, ?)
           ON CONFLICT(thread_id) DO UPDATE SET
             last_prompt = excluded.last_prompt,
+            summary = CASE
+              WHEN session_meta.summary IS NULL OR session_meta.summary = '' THEN excluded.summary
+              ELSE session_meta.summary
+            END,
+            summary_source = CASE
+              WHEN session_meta.summary IS NULL OR session_meta.summary = '' THEN excluded.summary_source
+              ELSE session_meta.summary_source
+            END,
             updated_at = excluded.updated_at
         `)
-        .run(threadId, normalizedPrompt, now);
+        .run(threadId, seedSummary, normalizedPrompt, now);
       return;
     }
 
     this.db
       .prepare(`
-        INSERT INTO session_meta(thread_id, name, last_prompt, updated_at)
-        VALUES(?, NULL, NULL, ?)
+        INSERT INTO session_meta(thread_id, name, summary_state, last_prompt, updated_at)
+        VALUES(?, NULL, 'pending_init', NULL, ?)
         ON CONFLICT(thread_id) DO UPDATE SET
           updated_at = excluded.updated_at
       `)
@@ -670,6 +898,45 @@ export class SessionStore {
     this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
+  private backfillLegacySessionSummaries(): void {
+    const rows = this.db
+      .prepare(`
+        SELECT thread_id AS threadId, last_prompt AS lastPrompt, updated_at AS updatedAt
+        FROM session_meta
+        WHERE (summary IS NULL OR summary = '')
+          AND last_prompt IS NOT NULL
+          AND TRIM(last_prompt) != ''
+      `)
+      .all() as Array<Record<string, unknown>>;
+    if (rows.length === 0) {
+      return;
+    }
+    const stmt = this.db.prepare(`
+      UPDATE session_meta
+      SET
+        summary = ?,
+        summary_source = 'seed',
+        summary_state = CASE
+          WHEN summary_state = 'manual_locked' THEN summary_state
+          ELSE 'stable'
+        END,
+        summary_updated_at = COALESCE(summary_updated_at, ?)
+      WHERE thread_id = ?
+    `);
+    for (const row of rows) {
+      const threadId = typeof row.threadId === 'string' ? row.threadId : '';
+      const lastPrompt = typeof row.lastPrompt === 'string' ? row.lastPrompt : '';
+      if (!threadId || !lastPrompt.trim()) {
+        continue;
+      }
+      stmt.run(
+        buildSeedSummary(lastPrompt),
+        typeof row.updatedAt === 'number' ? row.updatedAt : Date.now(),
+        threadId,
+      );
+    }
+  }
+
   private nextTimestamp(): number {
     const now = Date.now() * 1000;
     this.lastTs = Math.max(now, this.lastTs + 1);
@@ -689,7 +956,12 @@ function mapSessionListItem(row: Record<string, unknown>): SessionListItem {
   return {
     threadId: String(row.threadId ?? ''),
     name: typeof row.name === 'string' ? row.name : undefined,
+    summary: typeof row.summary === 'string' ? row.summary : undefined,
+    summaryState: typeof row.summaryState === 'string' ? row.summaryState : undefined,
+    summarySource: typeof row.summarySource === 'string' ? row.summarySource : undefined,
     lastPrompt: typeof row.lastPrompt === 'string' ? row.lastPrompt : undefined,
+    userTurnsSinceSummary: typeof row.userTurnsSinceSummary === 'number' ? row.userTurnsSinceSummary : undefined,
+    charsSinceSummary: typeof row.charsSinceSummary === 'number' ? row.charsSinceSummary : undefined,
     updatedAt: numberRow(row.updatedAt),
   };
 }
@@ -704,4 +976,12 @@ function isHiddenAgentId(agentId: string): boolean {
 
 function isHiddenAgent(agent: { agentId: string; name: string }): boolean {
   return isHiddenAgentId(agent.agentId) || HIDDEN_AGENT_NAMES.has(agent.name.trim());
+}
+
+function buildSeedSummary(input: string): string {
+  const normalized = input.replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+  return normalized.length <= 18 ? normalized : `${normalized.slice(0, 18).trimEnd()}…`;
 }

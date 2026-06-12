@@ -1,0 +1,6 @@
+interface:
+  display_name: "Bilibili Research"
+  short_description: "Research public Bilibili content."
+  default_prompt: "Use $bilibili-research for this task."
+policy:
+  allow_implicit_invocation: true
