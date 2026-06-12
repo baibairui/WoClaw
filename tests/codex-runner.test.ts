@@ -11,7 +11,7 @@ vi.mock('node:child_process', () => ({
 }));
 
 import { spawn } from 'node:child_process';
-import { CodexRunner, buildCodexArgs, buildCodexChildEnv, buildCodexReviewArgs, parseCodexJsonl, summarizeCodexItem } from '../src/services/codex-runner.js';
+import { CodexRunner, buildCodexArgs, buildCodexChildEnv, buildCodexReviewArgs, parseCodexJsonl, resolveServiceWorkdirIsolation, summarizeCodexItem } from '../src/services/codex-runner.js';
 import { buildCodexSpawnSpec } from '../src/services/codex-bwrap.js';
 
 function createMockChildProcess() {
@@ -272,6 +272,37 @@ message_id=om_1
 });
 
 describe('CodexRunner active control', () => {
+  it('starts app-server with the goals feature and without the removed session-source flag', () => {
+    const child = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as never);
+
+    const runner = new CodexRunner({ codexBin: 'codex' });
+    runner.runWithControl({ prompt: 'hello', workdir: '/tmp/agent-app-server-flags' });
+
+    const spawnArgs = vi.mocked(spawn).mock.calls[0]?.[1] as string[] | undefined;
+    expect(spawnArgs).toEqual(expect.arrayContaining(['app-server', '--listen', 'stdio://', '--enable', 'goals']));
+    expect(spawnArgs).not.toContain('--session-source');
+  });
+
+  it('does not configure native app-server tools through the legacy browser API env', () => {
+    const child = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as never);
+
+    const runner = new CodexRunner({
+      codexBin: 'codex',
+      browserApiBaseUrl: 'http://127.0.0.1:3000/internal/browser',
+      internalApiBaseUrl: 'http://127.0.0.1:3000/internal',
+      internalApiToken: 'token-123',
+      workdirIsolation: 'off',
+    });
+    runner.runWithControl({ prompt: 'hello', workdir: '/tmp/agent-native-env' });
+
+    const spawnOptions = vi.mocked(spawn).mock.calls.at(-1)?.[2] as { env?: NodeJS.ProcessEnv } | undefined;
+    expect(spawnOptions?.env?.GATEWAY_BROWSER_API_BASE).toBeUndefined();
+    expect(spawnOptions?.env?.GATEWAY_INTERNAL_API_BASE).toBeUndefined();
+    expect(spawnOptions?.env?.GATEWAY_INTERNAL_API_TOKEN).toBeUndefined();
+  });
+
   it('returns a stop handle for an active run', () => {
     const child = createMockChildProcess();
     vi.mocked(spawn).mockReturnValue(child as never);
@@ -365,7 +396,46 @@ describe('CodexRunner active control', () => {
     expect(onMessage).toHaveBeenCalledWith('收到，正常。');
   });
 
-  it('rewrites app-server cwd to /workspace when bwrap isolation is enabled', async () => {
+  it('uses the real agent cwd for app-server runs when workdir isolation is off', async () => {
+    const child = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as never);
+
+    const runner = new CodexRunner({
+      codexBin: 'codex',
+      timeoutMs: 1_000,
+      workdirIsolation: 'off',
+    });
+    const active = runner.runWithControl({ prompt: 'hello', workdir: '/tmp/agent-direct-appserver' });
+
+    await tick();
+    const spawnCall = vi.mocked(spawn).mock.calls[0];
+    expect(spawnCall?.[0]).not.toBe('bwrap');
+
+    child.stdout.write(`${JSON.stringify({ id: 1, result: { ok: true } })}\n`);
+    await tick();
+
+    const threadStartRequest = child.stdin.write.mock.calls
+      .map((call) => String(call[0]))
+      .find((payload) => payload.includes('"method":"thread/start"'));
+    expect(threadStartRequest).toContain('"cwd":"/tmp/agent-direct-appserver"');
+    const threadStartRequestId = JSON.parse(threadStartRequest ?? '{}').id;
+
+    child.stdout.write(`${JSON.stringify({ id: threadStartRequestId, result: { thread: { id: 'thread_active' } } })}\n`);
+    child.stdout.write(`${JSON.stringify({ method: 'thread/started', params: { thread: { id: 'thread_active' } } })}\n`);
+    await tick();
+
+    const turnStartRequest = child.stdin.write.mock.calls
+      .map((call) => String(call[0]))
+      .find((payload) => payload.includes('"method":"turn/start"'));
+    expect(turnStartRequest).toContain('"cwd":"/tmp/agent-direct-appserver"');
+    const turnStartRequestId = JSON.parse(turnStartRequest ?? '{}').id;
+
+    child.stdout.write(`${JSON.stringify({ id: turnStartRequestId, result: { turn: { id: 'turn_active', status: 'inProgress' } } })}\n`);
+    child.stdout.write(`${JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread_active', turn: { id: 'turn_active', status: 'completed' } } })}\n`);
+    await expect(active.result).resolves.toMatchObject({ threadId: 'thread_active' });
+  });
+
+  it('rewrites app-server cwd to /workspace for bwrap-isolated agent runs', async () => {
     const child = createMockChildProcess();
     vi.mocked(spawn).mockReturnValue(child as never);
 
@@ -394,6 +464,194 @@ describe('CodexRunner active control', () => {
       .map((call) => String(call[0]))
       .find((payload) => payload.includes('"method":"turn/start"'));
     expect(turnStartRequest).toContain('"cwd":"/workspace"');
+    const turnStartRequestId = JSON.parse(turnStartRequest ?? '{}').id;
+    child.stdout.write(`${JSON.stringify({ id: turnStartRequestId, result: { turn: { id: 'turn_active', status: 'inProgress' } } })}\n`);
+    child.stdout.write(`${JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread_active', turn: { id: 'turn_active', status: 'completed' } } })}\n`);
+    await expect(active.result).resolves.toMatchObject({ threadId: 'thread_active' });
+  });
+
+  it('passes native /goal commands through turn/start and emits goal updates', async () => {
+    const child = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as never);
+    const onMessage = vi.fn();
+
+    const runner = new CodexRunner({
+      codexBin: 'codex',
+      timeoutMs: 1_000,
+      workdirIsolation: 'bwrap',
+    });
+    const active = runner.runWithControl({
+      prompt: '/goal improve benchmark coverage',
+      model: 'gpt-5-codex',
+      workdir: '/tmp/agent-goal',
+      onMessage,
+    });
+
+    await tick();
+    child.stdout.write(`${JSON.stringify({ id: 1, result: { ok: true } })}\n`);
+    await tick();
+
+    const threadStartRequest = child.stdin.write.mock.calls
+      .map((call) => String(call[0]))
+      .find((payload) => payload.includes('"method":"thread/start"'));
+    expect(threadStartRequest).toContain('"cwd":"/workspace"');
+    const threadStartRequestId = JSON.parse(threadStartRequest ?? '{}').id;
+    child.stdout.write(`${JSON.stringify({ id: threadStartRequestId, result: { thread: { id: 'thread_goal' } } })}\n`);
+    child.stdout.write(`${JSON.stringify({ method: 'thread/started', params: { thread: { id: 'thread_goal' } } })}\n`);
+
+    await tick();
+    const turnStartRequest = child.stdin.write.mock.calls
+      .map((call) => String(call[0]))
+      .find((payload) => payload.includes('"method":"turn/start"'));
+    expect(turnStartRequest).toContain('"text":"/goal improve benchmark coverage"');
+    expect(child.stdin.write.mock.calls.map((call) => String(call[0])).join('\n')).not.toContain('"method":"thread/goal/set"');
+    const turnStartRequestId = JSON.parse(turnStartRequest ?? '{}').id;
+    child.stdout.write(`${JSON.stringify({ id: turnStartRequestId, result: { turn: { id: 'turn_goal', status: 'inProgress' } } })}\n`);
+    child.stdout.write(`${JSON.stringify({
+      method: 'thread/goal/updated',
+      params: {
+        threadId: 'thread_goal',
+        turnId: 'turn_goal',
+        goal: {
+          threadId: 'thread_goal',
+          objective: 'improve benchmark coverage',
+          status: 'active',
+          tokenBudget: null,
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    })}\n`);
+    child.stdout.write(`${JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread_goal', turn: { id: 'turn_goal', status: 'completed' } } })}\n`);
+
+    await expect(active.result).resolves.toMatchObject({
+      threadId: 'thread_goal',
+    });
+    expect(onMessage).toHaveBeenCalledWith(expect.stringContaining('已更新 Codex 目标'));
+    expect(onMessage).toHaveBeenCalledWith(expect.stringContaining('improve benchmark coverage'));
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('emits native goal clear notifications', async () => {
+    const child = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as never);
+    const onMessage = vi.fn();
+
+    const runner = new CodexRunner({
+      codexBin: 'codex',
+      timeoutMs: 1_000,
+      workdirIsolation: 'off',
+    });
+    const active = runner.runWithControl({
+      prompt: '/goal clear',
+      workdir: '/tmp/agent-goal-direct',
+      onMessage,
+    });
+
+    await tick();
+    const spawnCall = vi.mocked(spawn).mock.calls[0];
+    expect(spawnCall?.[0]).not.toBe('bwrap');
+
+    child.stdout.write(`${JSON.stringify({ id: 1, result: { ok: true } })}\n`);
+    await tick();
+
+    const threadStartRequest = child.stdin.write.mock.calls
+      .map((call) => String(call[0]))
+      .find((payload) => payload.includes('"method":"thread/start"'));
+    expect(threadStartRequest).toContain('"cwd":"/tmp/agent-goal-direct"');
+    const threadStartRequestId = JSON.parse(threadStartRequest ?? '{}').id;
+    child.stdout.write(`${JSON.stringify({ id: threadStartRequestId, result: { thread: { id: 'thread_goal_direct' } } })}\n`);
+    child.stdout.write(`${JSON.stringify({ method: 'thread/started', params: { thread: { id: 'thread_goal_direct' } } })}\n`);
+
+    await tick();
+    const turnStartRequest = child.stdin.write.mock.calls
+      .map((call) => String(call[0]))
+      .find((payload) => payload.includes('"method":"turn/start"'));
+    expect(turnStartRequest).toContain('"text":"/goal clear"');
+    const turnStartRequestId = JSON.parse(turnStartRequest ?? '{}').id;
+    child.stdout.write(`${JSON.stringify({ id: turnStartRequestId, result: { turn: { id: 'turn_goal_clear', status: 'inProgress' } } })}\n`);
+    child.stdout.write(`${JSON.stringify({ method: 'thread/goal/cleared', params: { threadId: 'thread_goal_direct' } })}\n`);
+    child.stdout.write(`${JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread_goal_direct', turn: { id: 'turn_goal_clear', status: 'completed' } } })}\n`);
+
+    await expect(active.result).resolves.toMatchObject({
+      threadId: 'thread_goal_direct',
+    });
+    expect(onMessage).toHaveBeenCalledWith(expect.stringContaining('已清除当前 Codex 目标'));
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('responds to native dynamic tool calls with the official response format', async () => {
+    const child = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as never);
+    const nativeToolHandler = vi.fn(async () => ({
+      contentItems: [
+        { type: 'inputText' as const, text: 'browser snapshot ok' },
+      ],
+      success: true,
+    }));
+
+    const runner = new CodexRunner({
+      codexBin: 'codex',
+      timeoutMs: 1_000,
+      workdirIsolation: 'off',
+      nativeToolHandler,
+    });
+    const active = runner.runWithControl({
+      prompt: 'inspect the page',
+      workdir: '/tmp/agent-native-tool',
+    });
+
+    await tick();
+    child.stdout.write(`${JSON.stringify({ id: 1, result: { ok: true } })}\n`);
+    await tick();
+
+    const threadStartRequest = child.stdin.write.mock.calls
+      .map((call) => String(call[0]))
+      .find((payload) => payload.includes('"method":"thread/start"'));
+    const threadStartRequestId = JSON.parse(threadStartRequest ?? '{}').id;
+    child.stdout.write(`${JSON.stringify({ id: threadStartRequestId, result: { thread: { id: 'thread_native_tool' } } })}\n`);
+    child.stdout.write(`${JSON.stringify({ method: 'thread/started', params: { thread: { id: 'thread_native_tool' } } })}\n`);
+
+    await tick();
+    const turnStartRequest = child.stdin.write.mock.calls
+      .map((call) => String(call[0]))
+      .find((payload) => payload.includes('"method":"turn/start"'));
+    const turnStartRequestId = JSON.parse(turnStartRequest ?? '{}').id;
+    child.stdout.write(`${JSON.stringify({ id: turnStartRequestId, result: { turn: { id: 'turn_native_tool', status: 'inProgress' } } })}\n`);
+    child.stdout.write(`${JSON.stringify({
+      id: 77,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thread_native_tool',
+        turnId: 'turn_native_tool',
+        callId: 'call_browser',
+        namespace: 'gateway-browser',
+        tool: 'snapshot',
+        arguments: {},
+      },
+    })}\n`);
+
+    await tick();
+    const toolResponse = child.stdin.write.mock.calls
+      .map((call) => String(call[0]))
+      .find((payload) => payload.includes('"id":77'));
+    expect(nativeToolHandler).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'item/tool/call',
+      params: expect.objectContaining({
+        callId: 'call_browser',
+        tool: 'snapshot',
+      }),
+    }));
+    expect(toolResponse).toContain('"result"');
+    expect(toolResponse).toContain('"contentItems":[{"type":"inputText","text":"browser snapshot ok"}]');
+    expect(toolResponse).toContain('"success":true');
+
+    child.stdout.write(`${JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread_native_tool', turn: { id: 'turn_native_tool', status: 'completed' } } })}\n`);
+    await expect(active.result).resolves.toMatchObject({
+      threadId: 'thread_native_tool',
+    });
   });
 });
 
@@ -489,6 +747,21 @@ describe('buildCodexChildEnv', () => {
     expect(env.GATEWAY_ROOT_DIR).toBe('/opt/gateway');
     expect(env.GATEWAY_PUBLIC_BASE_URL).toBe('https://gateway.example.com');
     expect(env.GATEWAY_USER_ID).toBe('u1');
+  });
+});
+
+describe('resolveServiceWorkdirIsolation', () => {
+  it('defaults to direct spawn on macOS where bubblewrap is unavailable', () => {
+    expect(resolveServiceWorkdirIsolation({}, 'darwin')).toBe('off');
+  });
+
+  it('keeps bubblewrap as the Linux default', () => {
+    expect(resolveServiceWorkdirIsolation({}, 'linux')).toBe('bwrap');
+  });
+
+  it('honors explicit CODEX_WORKDIR_ISOLATION override', () => {
+    expect(resolveServiceWorkdirIsolation({ CODEX_WORKDIR_ISOLATION: 'off' }, 'linux')).toBe('off');
+    expect(resolveServiceWorkdirIsolation({ CODEX_WORKDIR_ISOLATION: 'bwrap' }, 'darwin')).toBe('bwrap');
   });
 });
 
@@ -706,6 +979,131 @@ describe('buildCodexSpawnSpec', () => {
 
     expect(fs.readFileSync(runtimeAuthFile, 'utf8')).toBe('{"token":"abc"}');
     expect(fs.readFileSync(runtimeConfigFile, 'utf8')).toBe('model = "gpt-5"');
+  });
+
+  it('syncs managed global skills into the canonical Codex runtime skill root for bwrap runs', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-bwrap-global-skills-'));
+    const hostHome = path.join(tempRoot, 'host-home');
+    const instanceHome = path.join(tempRoot, 'instance-home');
+    const workspaceDir = path.join(tempRoot, 'workspace');
+    const homeAgentsSkillFile = path.join(
+      instanceHome,
+      '.agents',
+      'skills',
+      'using-superpowers',
+      'SKILL.md',
+    );
+    const homeCodexSkillFile = path.join(
+      instanceHome,
+      '.codex',
+      'skills',
+      'playwright',
+      'SKILL.md',
+    );
+    const runtimeAgentsSkillFile = path.join(
+      workspaceDir,
+      '.codex-runtime',
+      'home',
+      '.codex',
+      'skills',
+      'using-superpowers',
+      'SKILL.md',
+    );
+    const runtimeCodexSkillFile = path.join(
+      workspaceDir,
+      '.codex-runtime',
+      'home',
+      '.codex',
+      'skills',
+      'playwright',
+      'SKILL.md',
+    );
+
+    fs.mkdirSync(hostHome, { recursive: true });
+    fs.mkdirSync(instanceHome, { recursive: true });
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    fs.mkdirSync(path.dirname(homeAgentsSkillFile), { recursive: true });
+    fs.mkdirSync(path.dirname(homeCodexSkillFile), { recursive: true });
+    fs.writeFileSync(homeAgentsSkillFile, 'name: using-superpowers\n', 'utf8');
+    fs.writeFileSync(homeCodexSkillFile, 'name: playwright\n', 'utf8');
+
+    buildCodexSpawnSpec({
+      codexBin: '/usr/bin/codex',
+      args: ['exec', '--json', 'hello'],
+      cwd: workspaceDir,
+      env: {
+        HOME: hostHome,
+        PATH: '/usr/bin:/bin',
+      },
+      isolationMode: 'bwrap',
+      codexHomeDir: instanceHome,
+    });
+
+    expect(fs.readFileSync(runtimeAgentsSkillFile, 'utf8')).toBe('name: using-superpowers\n');
+    expect(fs.readFileSync(runtimeCodexSkillFile, 'utf8')).toBe('name: playwright\n');
+    expect(fs.existsSync(path.join(workspaceDir, '.codex-runtime', 'home', '.agents', 'skills'))).toBe(false);
+  });
+
+  it('applies disabled skill policy to runtime global syncs and workspace-local skill mounts', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-bwrap-skill-policy-'));
+    const hostHome = path.join(tempRoot, 'host-home');
+    const instanceHome = path.join(tempRoot, 'instance-home');
+    const workspaceDir = path.join(tempRoot, 'workspace');
+    const enabledGlobalSkillFile = path.join(instanceHome, '.codex', 'skills', 'global-on', 'SKILL.md');
+    const disabledGlobalSkillFile = path.join(instanceHome, '.codex', 'skills', 'global-off-dir', 'SKILL.md');
+    const disabledCodexLocalSkillFile = path.join(workspaceDir, '.codex', 'skills', 'local-off-dir', 'SKILL.md');
+    const disabledAgentsLocalSkillFile = path.join(workspaceDir, '.agents', 'skills', 'legacy-off-dir', 'SKILL.md');
+
+    fs.mkdirSync(hostHome, { recursive: true });
+    fs.mkdirSync(path.dirname(enabledGlobalSkillFile), { recursive: true });
+    fs.mkdirSync(path.dirname(disabledGlobalSkillFile), { recursive: true });
+    fs.mkdirSync(path.dirname(disabledCodexLocalSkillFile), { recursive: true });
+    fs.mkdirSync(path.dirname(disabledAgentsLocalSkillFile), { recursive: true });
+    fs.writeFileSync(enabledGlobalSkillFile, ['---', 'name: global-on', '---', ''].join('\n'), 'utf8');
+    fs.writeFileSync(disabledGlobalSkillFile, ['---', 'name: global-off', '---', ''].join('\n'), 'utf8');
+    fs.writeFileSync(disabledCodexLocalSkillFile, ['---', 'name: local-off', '---', ''].join('\n'), 'utf8');
+    fs.writeFileSync(disabledAgentsLocalSkillFile, ['---', 'name: legacy-off', '---', ''].join('\n'), 'utf8');
+
+    const spec = buildCodexSpawnSpec({
+      codexBin: '/usr/bin/codex',
+      args: ['exec', '--json', 'hello'],
+      cwd: workspaceDir,
+      env: {
+        HOME: hostHome,
+        PATH: '/usr/bin:/bin',
+      },
+      isolationMode: 'bwrap',
+      codexHomeDir: instanceHome,
+      skillPolicy: {
+        disabledGlobalSkills: ['global-off'],
+        disabledAgentSkills: ['local-off', 'legacy-off'],
+      },
+    });
+
+    expect(fs.existsSync(path.join(
+      workspaceDir,
+      '.codex-runtime',
+      'home',
+      '.codex',
+      'skills',
+      'global-on',
+      'SKILL.md',
+    ))).toBe(true);
+    expect(fs.existsSync(path.join(
+      workspaceDir,
+      '.codex-runtime',
+      'home',
+      '.codex',
+      'skills',
+      'global-off-dir',
+      'SKILL.md',
+    ))).toBe(false);
+    expect(spec.args).toEqual(expect.arrayContaining([
+      '--tmpfs',
+      '/workspace/.codex/skills/local-off-dir',
+      '--tmpfs',
+      '/workspace/.agents/skills/legacy-off-dir',
+    ]));
   });
 
   it('propagates FEISHU env vars into isolated runs', () => {

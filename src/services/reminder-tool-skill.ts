@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { upsertManagedSection } from './agents-managed-sections.js';
 
 export const REMINDER_TOOL_SKILL_NAME = 'reminder-tool';
 const REMINDER_RULE_START = '<!-- gateway:reminder-rule:start -->';
@@ -266,25 +267,4 @@ function installToSkillRoot(skillRootDir: string): void {
 function removeLegacySkillDirs(workspaceDir: string): void {
   fs.rmSync(path.join(workspaceDir, 'skills', REMINDER_TOOL_SKILL_NAME), { recursive: true, force: true });
   fs.rmSync(path.join(workspaceDir, '.agent', 'skills', REMINDER_TOOL_SKILL_NAME), { recursive: true, force: true });
-}
-
-function upsertManagedSection(
-  content: string,
-  startMarker: string,
-  endMarker: string,
-  section: string,
-  legacyPatterns: RegExp[],
-): string {
-  let next = content;
-  for (const pattern of legacyPatterns) {
-    next = next.replace(pattern, '\n');
-  }
-  const start = next.indexOf(startMarker);
-  const end = next.indexOf(endMarker);
-  if (start >= 0 && end > start) {
-    const before = next.slice(0, start).trimEnd();
-    const after = next.slice(end + endMarker.length).trimStart();
-    return [before, section, after].filter(Boolean).join('\n\n');
-  }
-  return `${next.trimEnd()}\n\n${section}\n`;
 }

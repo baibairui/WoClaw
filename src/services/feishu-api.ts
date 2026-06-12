@@ -977,6 +977,10 @@ function buildMarkdownCardContent(markdownText: string): Record<string, unknown>
   };
 }
 
+export function buildFeishuTextCardContent(text: string): Record<string, unknown> {
+  return buildMarkdownCardContent(extractAgentMarkdownCardBody(text) ?? text);
+}
+
 function extractAgentMarkdownCardBody(text: string): string | undefined {
   const match = text.match(/^(.+?) ·\n([\s\S]+)$/);
   if (!match) {

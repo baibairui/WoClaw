@@ -82,7 +82,7 @@ describe('handleUserCommand', () => {
     expect(result.message).toContain('帮助页 3/3');
     expect(result.message).not.toContain('/deploy-workspace - 发布当前 agent 工作区');
     expect(result.message).not.toContain('/publish-workspace - 发布当前 agent 工作区');
-    expect(result.message).toContain('/repair-users - 清理并修复已部署用户工作区');
+    expect(result.message).not.toContain('/repair-users');
     expect(result.message).toContain('/review commit [SHA] - 审查指定提交');
     expect(result.message).toContain('翻页：/help 2 | /help 3');
   });
@@ -246,6 +246,21 @@ describe('handleUserCommand', () => {
     expect(handleUserCommand('/search off', context).setSearchEnabled).toBe(false);
   });
 
+  it('passes Codex native goal commands through to the runner', () => {
+    expect(handleUserCommand('/goal', context)).toMatchObject({
+      handled: false,
+      nativeCodexCommand: 'goal',
+    });
+    expect(handleUserCommand('/goal clear', context)).toMatchObject({
+      handled: false,
+      nativeCodexCommand: 'goal',
+    });
+    expect(handleUserCommand('/goal improve benchmark coverage', context)).toMatchObject({
+      handled: false,
+      nativeCodexCommand: 'goal',
+    });
+  });
+
   it('supports deploy and review commands', () => {
     expect(handleUserCommand('/deploy-workspace', context).publishWorkspace).toBe(true);
     expect(handleUserCommand('/review', context).reviewMode).toBe('uncommitted');
@@ -254,6 +269,12 @@ describe('handleUserCommand', () => {
 
   it('treats /remind as unknown command', () => {
     const result = handleUserCommand('/remind 5min 喝水', context);
+    expect(result.handled).toBe(true);
+    expect(result.message).toContain('未识别命令');
+  });
+
+  it('does not expose /repair-users as a user-facing command', () => {
+    const result = handleUserCommand('/repair-users', context);
     expect(result.handled).toBe(true);
     expect(result.message).toContain('未识别命令');
   });

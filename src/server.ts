@@ -9,6 +9,7 @@ import { WorkspacePublisher } from './services/workspace-publisher.js';
 import { AgentWorkspaceManager } from './services/agent-workspace-manager.js';
 import { BrowserManager } from './services/browser-manager.js';
 import { createBrowserAutomationBackend } from './services/browser-service.js';
+import { createGatewayNativeToolHandler } from './services/codex-native-tool-adapter.js';
 import { CodexRunner } from './services/codex-runner.js';
 import { createChatHandler } from './services/chat-handler.js';
 import { getCliProviderSpec, readCliHomeDefaultModel, runnerHomeDirName, writeCliApiLoginConfig } from './services/cli-provider.js';
@@ -23,11 +24,7 @@ import { MemorySteward } from './services/memory-steward.js';
 import { SessionSummarySteward } from './services/session-summary-steward.js';
 import { ReminderStore } from './services/reminder-store.js';
 import { ReminderDispatcher } from './services/reminder-dispatcher.js';
-import { installReminderToolSkill } from './services/reminder-tool-skill.js';
-import { installGatewayBrowserSkill, syncManagedGlobalSkills } from './services/gateway-browser-skill.js';
-import { installGatewayDesktopSkill, syncManagedGlobalDesktopSkills } from './services/gateway-desktop-skill.js';
 import { ensureLarkCliReady } from './services/lark-cli-bootstrap.js';
-import { installLarkCliSkill } from './services/lark-cli-skill.js';
 import { OpenCodeAuthFlowManager, buildOpenCodeAuthSessionKey } from './services/opencode-auth-flow.js';
 import { pushFeishuStartupHelp } from './services/startup-help.js';
 import { createSpeechService } from './services/speech-service-factory.js';
@@ -35,6 +32,7 @@ import { createTtsService } from './services/tts-service-factory.js';
 import { WeComApi } from './services/wecom-api.js';
 import { WeixinApi, splitWeixinOutboundText, type WeixinInboundMessage } from './services/weixin-api.js';
 import { FeishuApi } from './services/feishu-api.js';
+import { createFeishuStreamingTextSender } from './services/feishu-streaming.js';
 import { WeComCrypto } from './utils/wecom-crypto.js';
 import { appendFeishuAttachmentMetadata, extractFeishuBinaryRef } from './utils/feishu-inbound.js';
 import { isFeishuUpdateMessageType, normalizeFeishuStructuredMessage } from './utils/feishu-outgoing.js';
@@ -44,6 +42,9 @@ import { SessionStore } from './stores/session-store.js';
 import { MessageDedupStore } from './stores/message-dedup-store.js';
 import { RateLimitStore } from './stores/rate-limit-store.js';
 import { createLogger } from './utils/logger.js';
+import { configureManagedGlobalSkillRoots } from './services/gateway-browser-skill.js';
+import { runStartupWorkspaceRepair } from './services/workspace-repair.js';
+import { resolveGatewayRunnerHomeDirs, resolveManagedGlobalSkillRoots } from './services/managed-global-skill-roots.js';
 
 const log = createLogger('Server');
 const gatewayRootDir = resolveGatewayRootDir(config.gatewayRootDir);
@@ -58,6 +59,8 @@ const agentsDir = resolveAgentsDir({
 const codexWorkdir = resolveCodexWorkdir(config.codexWorkdir, agentsDir);
 const codexHomeDir = path.join(dataDir, runnerHomeDirName('codex'));
 const opencodeHomeDir = path.join(dataDir, runnerHomeDirName('opencode'));
+const runnerHomeDirs = resolveGatewayRunnerHomeDirs(dataDir);
+const managedGlobalSkillRoots = resolveManagedGlobalSkillRoots(runnerHomeDirs);
 const cliProviderSpec = getCliProviderSpec(config.codexProvider);
 const feishuStatusSummary = buildFeishuStatusSummary({
   enabled: config.feishuEnabled,
@@ -84,8 +87,9 @@ log.info('服务启动初始化...', {
   commandTimeoutPerCharMs: config.commandTimeoutPerCharMs,
   browserAutomationEnabled: config.browserAutomationEnabled,
   browserApiBaseUrl: '(gateway-owned local only)',
+  openAiCompatEnabled: Boolean(config.openAiCompat),
+  openAiCompatUpstreamBaseUrl: config.openAiCompat?.upstreamBaseUrl ?? '(disabled)',
   browserProfileDir: config.browserProfileDir ?? '(default)',
-  codexWorkdirIsolation: config.codexWorkdirIsolation,
   codexHomeDir: config.codexProvider === 'opencode' ? opencodeHomeDir : codexHomeDir,
   runnerEnabled: config.runnerEnabled,
   memoryStewardEnabled: config.memoryStewardEnabled,
@@ -114,6 +118,9 @@ const internalApiToken = process.env.GATEWAY_INTERNAL_API_TOKEN?.trim() || rando
 const browserAutomation = config.browserAutomationEnabled
   ? createBrowserAutomationBackend(browserManager)
   : undefined;
+const nativeToolHandler = createGatewayNativeToolHandler({
+  browserAutomation,
+});
 const activeBrowserApiBaseUrl = config.browserAutomationEnabled
   ? `http://127.0.0.1:${config.port}/internal/browser`
   : undefined;
@@ -122,10 +129,10 @@ const feishuImageCacheDir = path.join(dataDir, 'feishu-images');
 fs.mkdirSync(codexHomeDir, { recursive: true });
 fs.mkdirSync(opencodeHomeDir, { recursive: true });
 fs.mkdirSync(feishuImageCacheDir, { recursive: true });
+configureManagedGlobalSkillRoots(managedGlobalSkillRoots);
 
 await ensureLarkCliReady({
-  gatewayRootDir,
-  codexHomeDir,
+  cliHomeDirs: runnerHomeDirs,
   log,
 });
 
@@ -139,7 +146,14 @@ const sessionStore = new SessionStore(path.join(dataDir, 'sessions.db'), {
 log.debug('SessionStore 已初始化');
 const agentWorkspaceManager = new AgentWorkspaceManager(agentsDir);
 log.debug('AgentWorkspaceManager 已初始化', { agentsDir });
-syncBuiltInSkills(agentWorkspaceManager, agentsDir);
+const startupWorkspaceRepairStats = runStartupWorkspaceRepair({
+  agentsDir,
+  cwd: process.cwd(),
+  gatewayRootDir,
+  managedGlobalSkillRoots,
+  workspaceManager: agentWorkspaceManager,
+});
+log.info('启动期 workspace repair 完成', startupWorkspaceRepairStats);
 const dedupStore = new MessageDedupStore(config.dedupWindowSeconds);
 log.debug('MessageDedupStore 已初始化', { dedupWindowSeconds: config.dedupWindowSeconds });
 const rateLimitStore = new RateLimitStore(config.rateLimitMaxMessages, config.rateLimitWindowSeconds);
@@ -162,8 +176,8 @@ const codexRunner = new CodexRunner({
   gatewayRootDir,
   gatewayPublicBaseUrl: config.gatewayPublicBaseUrl,
   sandbox: config.codexSandbox,
-  workdirIsolation: config.codexWorkdirIsolation,
   codexHomeDir,
+  nativeToolHandler,
 });
 const opencodeRunner = new CodexRunner({
   provider: 'opencode',
@@ -179,7 +193,6 @@ const opencodeRunner = new CodexRunner({
   gatewayRootDir,
   gatewayPublicBaseUrl: config.gatewayPublicBaseUrl,
   sandbox: config.codexSandbox,
-  workdirIsolation: config.codexWorkdirIsolation,
   codexHomeDir: opencodeHomeDir,
 });
 log.debug('Runners 已初始化');
@@ -507,11 +520,36 @@ async function sendText(channel: 'wecom' | 'feishu' | 'weixin', userId: string, 
 async function sendStreamingText(
   channel: 'wecom' | 'feishu' | 'weixin',
   userId: string,
-  _streamId: string,
+  streamId: string,
   content: string,
-  _done: boolean,
+  done: boolean,
 ): Promise<void> {
-  await enqueueSendText(channel, userId, content);
+  await getStreamingTextSender()(channel, userId, streamId, content, done);
+}
+
+let streamingTextSender: ReturnType<typeof createFeishuStreamingTextSender> | undefined;
+
+function getStreamingTextSender(): ReturnType<typeof createFeishuStreamingTextSender> {
+  if (!streamingTextSender) {
+    streamingTextSender = createFeishuStreamingTextSender({
+      sendText: enqueueSendText,
+      patchCardMessage: async (input) => {
+        if (!feishuApi) {
+          throw new Error('feishu api not configured');
+        }
+        await feishuApi.patchCardMessage(input);
+      },
+      onPatchError: (error, context) => {
+        log.warn('飞书流式消息更新失败，回退为发送新消息', {
+          userId: context.userId,
+          streamId: context.streamId,
+          messageId: context.messageId,
+          error: error.message,
+        });
+      },
+    });
+  }
+  return streamingTextSender;
 }
 
 async function enqueueSendText(channel: 'wecom' | 'feishu' | 'weixin', userId: string, content: string): Promise<string | undefined> {
@@ -659,6 +697,7 @@ const handleChatText = createChatHandler({
   defaultProvider: config.codexProvider,
   resolveDefaultModel: resolveChatDefaultModel,
   resolveRunner,
+  resolveRunnerHomeDir,
   defaultSearch: config.codexSearch,
   reminderDbPath,
   sendText,
@@ -723,6 +762,7 @@ const app = createApp({
   internalApiToken,
   gatewayRootDir,
   browserAutomation,
+  openAiCompat: config.openAiCompat,
   feishuVerificationToken: config.feishuVerificationToken,
   feishuLongConnection: feishuStatusSummary.mode === 'long-connection',
   feishuGroupRequireMention: feishuStatusSummary.groupRequireMention,
@@ -769,6 +809,7 @@ app.post('/internal/external-chat', async (req, res) => {
     defaultProvider: config.codexProvider,
     resolveDefaultModel: resolveChatDefaultModel,
     resolveRunner,
+    resolveRunnerHomeDir,
     defaultSearch: config.codexSearch,
     reminderDbPath,
     sendText: async (_channel, _userId, outbound) => {
@@ -1106,7 +1147,12 @@ async function appDepsHandleFeishuCardAction(input: {
         userId: input.userId,
         error: error instanceof Error ? error.message : String(error),
       });
-      await sendText('feishu', input.userId, '❌ 登录超时或遇到错误。请重试 /login 命令。');
+      await sendText('feishu', input.userId, buildFeishuApiLoginResultMessage({
+        provider: runtimeProvider,
+        ok: false,
+        message: `设备授权登录失败：${error instanceof Error ? error.message : String(error)}`,
+        model: runtimeProviderSpec.defaultModel,
+      }));
     }
     return;
   }
@@ -1208,55 +1254,4 @@ async function appDepsHandleFeishuCardAction(input: {
     chatId: input.chatId ?? '(empty)',
     action: input.action,
   });
-}
-
-function syncBuiltInSkills(agentWorkspaceManager: AgentWorkspaceManager, agentsRootDir: string): void {
-  syncManagedGlobalSkills();
-  syncManagedGlobalDesktopSkills();
-  installReminderToolSkill(path.resolve(agentsRootDir));
-  installLarkCliSkill(path.resolve(agentsRootDir));
-  agentWorkspaceManager.repairWorkspaceScaffold(path.resolve(agentsRootDir));
-  const usersDir = path.join(agentsRootDir, 'users');
-  if (!fs.existsSync(usersDir)) {
-    return;
-  }
-  for (const userDirName of fs.readdirSync(usersDir)) {
-    const userDir = path.join(usersDir, userDirName);
-    if (!fs.statSync(userDir).isDirectory()) {
-      continue;
-    }
-    for (const workspaceDir of listUserWorkspaceDirs(userDir)) {
-      installGatewayBrowserSkill(workspaceDir);
-      installGatewayDesktopSkill(workspaceDir);
-      installReminderToolSkill(workspaceDir);
-      installLarkCliSkill(workspaceDir);
-      agentWorkspaceManager.repairWorkspaceScaffold(workspaceDir);
-    }
-  }
-}
-
-function listUserWorkspaceDirs(userDir: string): string[] {
-  const output: string[] = [];
-  const agentsDir = path.join(userDir, 'agents');
-  if (fs.existsSync(agentsDir) && fs.statSync(agentsDir).isDirectory()) {
-    for (const workspaceName of fs.readdirSync(agentsDir)) {
-      const workspaceDir = path.join(agentsDir, workspaceName);
-      if (fs.statSync(workspaceDir).isDirectory()) {
-        output.push(workspaceDir);
-      }
-    }
-  }
-
-  for (const workspaceName of fs.readdirSync(userDir)) {
-    if (workspaceName === 'agents' || workspaceName === 'internal' || workspaceName === 'shared-memory' || workspaceName === '_memory-steward' || workspaceName === '_legacy') {
-      continue;
-    }
-    const workspaceDir = path.join(userDir, workspaceName);
-    if (!fs.statSync(workspaceDir).isDirectory()) {
-      continue;
-    }
-    output.push(workspaceDir);
-  }
-
-  return Array.from(new Set(output.map((dir) => path.resolve(dir))));
 }

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { formatCommandOutboundMessage } from './feishu-command-cards.js';
+import { buildFeishuDeviceAuthProgressMessage, formatCommandOutboundMessage } from './feishu-command-cards.js';
 import { getCliProviderSpec, type CliProvider } from './cli-provider.js';
 
 type Channel = 'wecom' | 'feishu' | 'weixin';
@@ -29,11 +29,24 @@ export async function startCodexDeviceLogin(input: StartCodexDeviceLoginInput): 
   const sendCommandText = async (text: string): Promise<void> => {
     await sendText(channel, userId, formatCommandOutboundMessage(channel, '/login', text));
   };
+  const sendDeviceAuthProgress = async (text: string): Promise<void> => {
+    await sendText(
+      channel,
+      userId,
+      channel === 'feishu'
+        ? buildFeishuDeviceAuthProgressMessage({
+            providerLabel: providerSpec.label,
+            text,
+          })
+        : formatCommandOutboundMessage(channel, '/login', text),
+    );
+  };
 
   await sendCommandText(provider === 'codex'
-    ? '⏳ 正在请求设备登录码，请稍候...'
-    : `⏳ 正在请求 ${providerSpec.label} 设备登录码，请稍候...`);
+    ? '⏳ 正在重新请求设备登录码，请稍候...'
+    : `⏳ 正在重新请求 ${providerSpec.label} 设备登录码，请稍候...`);
 
+  const suspendedAuth = suspendCliAuth(provider, codexHomeDir);
   const suspendedConfig = suspendCodexApiConfig(codexHomeDir);
 
   let lastStreamSend: Promise<void> = Promise.resolve();
@@ -44,13 +57,15 @@ export async function startCodexDeviceLogin(input: StartCodexDeviceLoginInput): 
         if (!sanitized) {
           return;
         }
-        lastStreamSend = sendCommandText(`【登录授权】\n${sanitized}`);
+        lastStreamSend = sendDeviceAuthProgress(sanitized);
       },
     });
     await lastStreamSend;
+    suspendedAuth.commit();
     suspendedConfig.commit();
     await sendCommandText(`✅ 登录成功！${providerSpec.label} CLI 已获得授权。`);
   } catch (error) {
+    suspendedAuth.restore();
     suspendedConfig.restore();
     throw error;
   }
@@ -68,6 +83,59 @@ function sanitizeDeviceAuthMessage(text: string): string {
 
 function stripAnsi(text: string): string {
   return text.replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, '');
+}
+
+function suspendCliAuth(provider: CliProvider, codexHomeDir: string | undefined): {
+  commit: () => void;
+  restore: () => void;
+} {
+  if (!codexHomeDir) {
+    return {
+      commit: () => undefined,
+      restore: () => undefined,
+    };
+  }
+  const resolvedHome = path.resolve(codexHomeDir);
+  const authPath = provider === 'opencode'
+    ? path.join(resolvedHome, '.local', 'share', 'opencode', 'auth.json')
+    : path.join(resolvedHome, 'auth.json');
+  if (!fs.existsSync(authPath) || !fs.statSync(authPath).isFile()) {
+    return {
+      commit: () => undefined,
+      restore: () => undefined,
+    };
+  }
+
+  const backupPath = `${authPath}.device-auth-backup`;
+  fs.rmSync(backupPath, { force: true });
+  fs.renameSync(authPath, backupPath);
+
+  let settled = false;
+  return {
+    commit: () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (!fs.existsSync(authPath)) {
+        if (fs.existsSync(backupPath)) {
+          fs.renameSync(backupPath, authPath);
+        }
+        throw new Error('device auth did not write a new auth.json');
+      }
+      fs.rmSync(backupPath, { force: true });
+    },
+    restore: () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      fs.rmSync(authPath, { force: true });
+      if (fs.existsSync(backupPath)) {
+        fs.renameSync(backupPath, authPath);
+      }
+    },
+  };
 }
 
 function suspendCodexApiConfig(codexHomeDir: string | undefined): {

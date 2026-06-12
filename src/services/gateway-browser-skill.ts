@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { upsertManagedSection } from './agents-managed-sections.js';
 
 export const GATEWAY_BROWSER_SKILL_NAME = 'gateway-browser';
 const LEGACY_SKILL_NAMES = ['playwright-explore-website', 'react-best-practices'];
@@ -12,6 +13,8 @@ interface GlobalSkillSyncOptions {
   roots?: string[];
 }
 
+let configuredManagedGlobalSkillRoots: string[] | undefined;
+
 export function installGatewayBrowserSkill(workspaceDir: string): void {
   installToSkillRoot(path.join(workspaceDir, '.codex', 'skills'));
   ensureAgentsBrowserRule(workspaceDir);
@@ -23,6 +26,10 @@ export function syncManagedGlobalSkills(options: GlobalSkillSyncOptions = {}): v
     installToSkillRoot(root);
     purgeLegacySkills(root);
   }
+}
+
+export function configureManagedGlobalSkillRoots(roots: string[] | undefined): void {
+  configuredManagedGlobalSkillRoots = normalizeManagedGlobalSkillRoots(roots);
 }
 
 export function renderGatewayBrowserSkill(): string {
@@ -410,33 +417,28 @@ function writeIfChanged(filePath: string, content: string): void {
 }
 
 export function defaultGlobalSkillRoots(): string[] {
-  const gatewayRootDir = process.env.GATEWAY_ROOT_DIR?.trim()
-    ? path.resolve(process.env.GATEWAY_ROOT_DIR.trim())
-    : path.resolve(process.cwd());
-  const runtimeHomeDir = path.join(gatewayRootDir, '.codex-runtime', 'home');
-  return [
-    path.join(runtimeHomeDir, '.codex', 'skills'),
-    path.join(runtimeHomeDir, '.agents', 'skills'),
-  ];
+  if (configuredManagedGlobalSkillRoots?.length) {
+    return [...configuredManagedGlobalSkillRoots];
+  }
+
+  const codexHomeDir = process.env.CODEX_HOME?.trim();
+  if (!codexHomeDir) {
+    return [];
+  }
+
+  const resolvedHome = path.resolve(codexHomeDir);
+  return [path.join(resolvedHome, '.codex', 'skills')];
 }
 
-function upsertManagedSection(
-  content: string,
-  startMarker: string,
-  endMarker: string,
-  section: string,
-  legacyPatterns: RegExp[],
-): string {
-  let next = content;
-  for (const pattern of legacyPatterns) {
-    next = next.replace(pattern, '\n');
+function normalizeManagedGlobalSkillRoots(roots: string[] | undefined): string[] | undefined {
+  if (!roots) {
+    return undefined;
   }
-  const start = next.indexOf(startMarker);
-  const end = next.indexOf(endMarker);
-  if (start >= 0 && end > start) {
-    const before = next.slice(0, start).trimEnd();
-    const after = next.slice(end + endMarker.length).trimStart();
-    return [before, section, after].filter(Boolean).join('\n\n');
-  }
-  return `${next.trimEnd()}\n\n${section}\n`;
+
+  const normalized = roots
+    .map((root) => root.trim())
+    .filter(Boolean)
+    .map((root) => path.resolve(root));
+
+  return normalized.length > 0 ? Array.from(new Set(normalized)) : undefined;
 }

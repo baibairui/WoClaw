@@ -98,14 +98,6 @@ function codexSandboxMode(): 'full-auto' | 'none' {
   throw new Error(`invalid CODEX_SANDBOX: ${value}`);
 }
 
-function codexWorkdirIsolationMode(): 'off' | 'bwrap' {
-  const value = process.env.CODEX_WORKDIR_ISOLATION ?? 'off';
-  if (value === 'off' || value === 'bwrap') {
-    return value;
-  }
-  throw new Error(`invalid CODEX_WORKDIR_ISOLATION: ${value}`);
-}
-
 function speechMode(): 'transcribe_only' | 'transcribe_and_reply' {
   const value = process.env.SPEECH_MODE ?? 'transcribe_and_reply';
   if (value === 'transcribe_only' || value === 'transcribe_and_reply') {
@@ -160,7 +152,6 @@ export const config = {
   codexAgentsDir: optionalStringUndefined('CODEX_AGENTS_DIR'),
   /** 'full-auto' (默认，有沙箱) 或 'none' (跳过沙箱，适合服务器) */
   codexSandbox: codexSandboxMode(),
-  codexWorkdirIsolation: codexWorkdirIsolationMode(),
   browserAutomationEnabled: optionalBoolean('BROWSER_AUTOMATION_ENABLED')
     ?? (process.env.BROWSER_MCP_ENABLED !== 'false'),
   browserProfileDir: optionalStringUndefined('BROWSER_PROFILE_DIR')
@@ -170,6 +161,18 @@ export const config = {
   memoryStewardIntervalHours: optionalNumber('MEMORY_STEWARD_INTERVAL_HOURS', 1),
   sessionSummaryStewardEnabled: process.env.SESSION_SUMMARY_STEWARD_ENABLED !== 'false',
   sessionSummaryStewardIntervalMinutes: optionalNumber('SESSION_SUMMARY_STEWARD_INTERVAL_MINUTES', 10),
+  openAiCompat: (() => {
+    const upstreamBaseUrl = normalizeBaseUrl(optionalStringUndefined('OPENAI_COMPAT_UPSTREAM_BASE_URL'));
+    const upstreamApiKey = optionalStringUndefined('OPENAI_COMPAT_UPSTREAM_API_KEY');
+    if (!upstreamBaseUrl || !upstreamApiKey) {
+      return undefined;
+    }
+    return {
+      upstreamBaseUrl,
+      upstreamApiKey,
+      clientApiKey: optionalStringUndefined('OPENAI_COMPAT_API_KEY'),
+    };
+  })(),
   speech: {
     enabled: process.env.SPEECH_ENABLED === 'true',
     mode: speechMode(),

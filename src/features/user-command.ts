@@ -30,11 +30,11 @@ export interface UserCommandResult {
   querySearch?: boolean;
   setSearchEnabled?: boolean;
   stopRunId?: string;
+  nativeCodexCommand?: 'goal';
   reviewMode?: 'uncommitted' | 'base' | 'commit';
   reviewTarget?: string;
   reviewPrompt?: string;
   publishWorkspace?: boolean;
-  repairUsers?: boolean;
   queryAgent?: boolean;
   queryAgents?: boolean;
   queryMemory?: boolean;
@@ -151,8 +151,8 @@ const HELP_ENTRIES: Array<{ section: string; line: string }> = [
   { section: '模型、技能与执行', line: '/search - 查看联网搜索状态' },
   { section: '模型、技能与执行', line: '/search on|off - 开启/关闭联网搜索' },
   { section: '模型、技能与执行', line: '/run stop [runId] - 停止指定运行中的任务' },
+  { section: '模型、技能与执行', line: '/goal [目标] - Codex 原生命令：查看、设置或清除当前目标' },
   { section: '工作区与运维', line: '/login - 使用设备码登录 Codex' },
-  { section: '工作区与运维', line: '/repair-users - 清理并修复已部署用户工作区（技能注入、规则升级、工作目录自愈）' },
   { section: '工作区与运维', line: '/review - 审查当前 agent 工作区变更' },
   { section: '工作区与运维', line: '/review base [分支] - 审查相对分支的变更' },
   { section: '工作区与运维', line: '/review commit [SHA] - 审查指定提交' },
@@ -491,17 +491,16 @@ export function handleUserCommand(content: string, context: UserCommandContext =
         message: '用法：/run stop <runId>',
       };
     }
+    case '/goal':
+      return {
+        handled: false,
+        nativeCodexCommand: 'goal',
+      };
     case '/deploy-workspace':
     case '/publish-workspace':
       return {
         handled: true,
         publishWorkspace: true,
-      };
-    case '/repair-users':
-    case '/repairusers':
-      return {
-        handled: true,
-        repairUsers: true,
       };
     case '/review': {
       const args = parts.slice(1);

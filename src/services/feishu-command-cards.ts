@@ -48,9 +48,10 @@ const COMMAND_LABELS: Record<string, string> = {
   '/models': '模型列表',
   '/skills': 'Skill 管理',
   '/search': '联网搜索',
+  '/goal': '目标管理',
+  '/failure': '处理未完成',
   '/deploy-workspace': 'Workspace 发布',
   '/publish-workspace': 'Workspace 发布',
-  '/repair-users': '用户工作区修复',
   '/review': '代码审查',
 };
 
@@ -64,9 +65,10 @@ const COMMAND_SUMMARIES: Record<string, string> = {
   '/provider': '查看当前执行框架，并通过卡片按钮切换 Codex 或 OpenCode。',
   '/models': '查看当前支持的模型集合，并回到当前模型设置。',
   '/search': '控制本会话的联网搜索开关，按需临时开启。',
+  '/goal': '查看、设置或清除当前 Codex 目标，让长期任务有一个明确的北极星。',
+  '/failure': '这次执行没有顺利完成，可以先查看帮助、检查登录，或回到当前会话继续排查。',
   '/review': '发起当前工作区的代码审查，支持按分支或提交审查。',
   '/login': '重新触发登录授权流程，恢复 Codex 执行能力。',
-  '/repair-users': '批量清理并升级已部署用户工作区，修复内置 skill、规则注入与工作目录状态。',
 };
 
 const COMMAND_TEMPLATES: Record<string, FeishuCardTemplate> = {
@@ -82,9 +84,10 @@ const COMMAND_TEMPLATES: Record<string, FeishuCardTemplate> = {
   '/provider': 'blue',
   '/models': 'blue',
   '/search': 'wathet',
+  '/goal': 'turquoise',
+  '/failure': 'orange',
   '/review': 'orange',
   '/login': 'blue',
-  '/repair-users': 'orange',
 };
 
 const CARD_COPY = {
@@ -155,9 +158,15 @@ const STATIC_QUICK_ACTIONS: Record<string, CommandQuickAction[]> = {
     { label: '使用 Codex', cmd: '/provider codex' },
     { label: '使用 OpenCode', cmd: '/provider opencode' },
   ],
-  '/repair-users': [
-    { label: '执行修复', cmd: '/repair-users', type: 'primary' },
-    { label: '查看帮助', cmd: '/help' },
+  '/goal': [
+    { label: '查看目标', cmd: '/goal', type: 'primary' },
+    { label: '清除目标', cmd: '/goal clear', type: 'danger' },
+    { label: '查看会话', cmd: '/session' },
+  ],
+  '/failure': [
+    { label: '查看帮助', cmd: '/help', type: 'primary' },
+    { label: '登录授权', cmd: '/login' },
+    { label: '当前会话', cmd: '/session' },
   ],
 };
 
@@ -270,6 +279,13 @@ function resolveCommandQuickActions(commandName: string, text: string): CommandQ
     return [
       { label: '上一页', cmd: `/help ${prev}`, type: page > 1 ? 'primary' : 'default' },
       { label: '下一页', cmd: `/help ${next}`, type: page < total ? 'primary' : 'default' },
+    ];
+  }
+  if (text.includes('未识别命令')) {
+    return [
+      { label: '查看帮助', cmd: '/help', type: 'primary' },
+      { label: '当前会话', cmd: '/session' },
+      { label: 'Agent 列表', cmd: '/agents' },
     ];
   }
   const staticActions = STATIC_QUICK_ACTIONS[normalized];
@@ -683,6 +699,31 @@ function buildSearchCardElements(text: string): Array<Record<string, unknown>> {
   return elements;
 }
 
+function buildGoalCardElements(text: string): Array<Record<string, unknown>> {
+  const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+  const objectiveLine = lines.find((line) => line.includes('目标：')) ?? lines[0] ?? text;
+  const objective = objectiveLine
+    .replace(/^[✅❌⚠️⏳]\s*/, '')
+    .replace(/^(已设置目标：|当前目标：)/, '')
+    .trim();
+  const statusLine = lines.find((line) => line.startsWith('状态：'));
+  const tokenBudgetLine = lines.find((line) => line.startsWith('Token 预算：'));
+  const elements: Array<Record<string, unknown>> = [
+    buildFeishuGuideBlock('当前目标', objective || text),
+  ];
+  if (statusLine || tokenBudgetLine) {
+    elements.push(buildFeishuFieldGrid([
+      { label: '状态', value: statusLine?.replace(/^状态：/, '').trim() ?? '' },
+      { label: 'Token 预算', value: tokenBudgetLine?.replace(/^Token 预算：/, '').trim() ?? '' },
+    ]));
+  }
+  const details = lines.filter((line) => line !== objectiveLine && line !== statusLine && line !== tokenBudgetLine);
+  if (details.length > 0) {
+    elements.push(buildFeishuDivider(), buildFeishuSectionBlock('详情', details));
+  }
+  return elements;
+}
+
 function buildHelpCardElements(text: string): Array<Record<string, unknown>> {
   const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
   const pageInfo = resolveHelpPageInfo(text);
@@ -727,6 +768,7 @@ function resolveHelpShortcutButtons(groupName: string): FeishuCardButton[] {
     return [
       { label: '模型管理', cmd: '/model', type: 'primary' },
       { label: '生效 Skills', cmd: '/skills' },
+      { label: '目标管理', cmd: '/goal' },
       { label: '搜索状态', cmd: '/search' },
     ];
   }
@@ -866,6 +908,7 @@ const COMMAND_CARD_RENDERERS: Record<string, CardElementBuilder> = {
   '/model': buildModelCardElements,
   '/models': buildModelCardElements,
   '/search': buildSearchCardElements,
+  '/goal': buildGoalCardElements,
   '/help': buildHelpCardElements,
 };
 
@@ -873,6 +916,9 @@ function resolveCommandCardElements(commandName: string, text: string): Array<Re
   const normalized = commandName.toLowerCase();
   if ((normalized === '/model' || normalized === '/models') && isModelRichText(text)) {
     return buildModelCardElements(text);
+  }
+  if (normalized === '/goal') {
+    return buildGoalCardElements(text);
   }
   if (/^[✅❌⚠️⏳]/.test(text.trim())) {
     return buildStatusCardElements(text);
@@ -939,7 +985,7 @@ export function buildFeishuRunCardMessage(input: {
   };
   const statusMeta = statusMap[input.status];
   const nextStep = input.status === 'running'
-    ? '如需中断本次执行，点击下方“结束”。'
+    ? '如需中断本次执行，点击下方“停止本次任务”。'
     : input.status === 'stopping'
     ? '稍等片刻，状态卡会继续更新。'
     : '当前阶段已经结束，如需继续可直接发送下一条消息。';
@@ -953,7 +999,7 @@ export function buildFeishuRunCardMessage(input: {
     elements.push(
       ...buildValueButtonRows([
         {
-          label: '结束',
+          label: '停止本次任务',
           type: 'danger',
           value: {
             gateway_cmd: `/run stop ${input.runId}`,
@@ -964,6 +1010,14 @@ export function buildFeishuRunCardMessage(input: {
         },
       ], 1),
     );
+  }
+  if (input.status === 'completed' || input.status === 'stopped' || input.status === 'stop_failed') {
+    elements.push(buildFeishuDivider(), buildFeishuGuideBlock('继续操作', '你可以查看当前会话状态，或继续管理本轮目标。'));
+    elements.push(...buildCommandButtonRows([
+      { label: '查看会话', cmd: '/session', type: 'primary' },
+      { label: '查看目标', cmd: '/goal' },
+      { label: '新建会话', cmd: '/new' },
+    ], 3));
   }
   return buildFeishuInteractiveMessage({
     config: {
@@ -986,6 +1040,11 @@ export function buildFeishuLoginChoiceMessage(input: {
   provider?: CliProvider;
   providerLabel?: string;
   supportsDeviceAuth?: boolean;
+  authState?: {
+    hasConfig?: boolean;
+    hasAuth?: boolean;
+    model?: string;
+  };
 } = {}): string {
   const provider = input.provider ?? 'codex';
   if (provider === 'opencode') {
@@ -1016,8 +1075,12 @@ export function buildFeishuLoginChoiceMessage(input: {
           : `当前模型通道是 ${providerLabel}，请直接写入项目内 API 配置。`,
       ),
       buildFeishuFieldGrid([
+        { label: '当前通道', value: providerLabel },
         { label: '写入位置', value: writeLocation },
         { label: '认证文件', value: authLocation },
+        { label: '配置状态', value: formatLoginConfigState(input.authState?.hasConfig) },
+        { label: '授权状态', value: formatLoginAuthState(input.authState?.hasAuth) },
+        { label: '当前模型', value: input.authState?.model?.trim() || '未读取' },
       ]),
       buildFeishuTipsNote([
         `API Key 不会通过普通聊天文本转发给 ${providerLabel}。`,
@@ -1045,6 +1108,139 @@ export function buildFeishuLoginChoiceMessage(input: {
       ], 2),
     ],
   });
+}
+
+export function buildFeishuDeviceAuthProgressMessage(input: {
+  providerLabel?: string;
+  text: string;
+}): string {
+  const providerLabel = input.providerLabel?.trim() || 'Codex';
+  const text = input.text.trim();
+  const authUrl = extractFirstUrl(text);
+  const deviceCode = extractDeviceAuthCode(text, authUrl);
+  const jumpUrl = buildDeviceAuthJumpUrl(authUrl, deviceCode);
+  const fields: FeishuCardField[] = [
+    { label: '登录通道', value: providerLabel },
+    { label: '授权码', value: deviceCode ? `\`${deviceCode}\`` : '等待 CLI 输出授权码' },
+    { label: '授权链接', value: jumpUrl ? `[点击打开授权页面](${jumpUrl})` : '等待 CLI 输出授权链接' },
+  ];
+  const actions: FeishuValueButton[] = [
+    ...(jumpUrl
+      ? [{
+          label: '打开授权链接',
+          type: 'primary' as const,
+          multiUrl: jumpUrl,
+        }]
+      : []),
+    {
+      label: '重新选择登录',
+      value: {
+        gateway_cmd: '/login',
+        command: '/login',
+        text: '/login',
+      },
+    },
+  ];
+
+  return buildFeishuInteractiveMessage({
+    config: {
+      wide_screen_mode: true,
+      enable_forward: false,
+    },
+    header: {
+      template: authUrl ? 'blue' : 'wathet',
+      title: {
+        tag: 'plain_text',
+        content: '设备授权登录',
+      },
+    },
+    elements: [
+      buildFeishuStepBlock(
+        '步骤 2',
+        '打开授权页面完成登录',
+        jumpUrl
+          ? '点击卡片中的授权链接或下方按钮打开授权页面；授权码已放在跳转链接里，也可从卡片中复制。'
+          : '正在等待 CLI 返回授权链接，请稍候。',
+      ),
+      buildFeishuFieldGrid(fields),
+      buildFeishuDivider(),
+      ...buildValueButtonRows(actions, actions.length > 1 ? 2 : 1),
+    ],
+  });
+}
+
+function extractFirstUrl(text: string): string | undefined {
+  const match = text.match(/https?:\/\/[^\s<>"')）\]]+/i);
+  return match?.[0]?.replace(/[.,;，。；:：]+$/, '');
+}
+
+function extractDeviceAuthCode(text: string, authUrl: string | undefined): string | undefined {
+  if (authUrl) {
+    try {
+      const parsedUrl = new URL(authUrl);
+      for (const key of ['user_code', 'userCode', 'code']) {
+        const value = parsedUrl.searchParams.get(key)?.trim();
+        if (value) {
+          return value;
+        }
+      }
+    } catch {
+      // Non-standard URLs still fall through to text parsing.
+    }
+  }
+
+  const separatedCodeMatch = text.match(/([A-Z0-9]{4,}(?:[- ][A-Z0-9]{3,}?))(?=Device codes|device codes|[^A-Za-z0-9]|$)/);
+  if (separatedCodeMatch?.[1]) {
+    return separatedCodeMatch[1].replace(/\s+/g, '-');
+  }
+
+  const lowerText = text.toLowerCase();
+  const cueIndex = lowerText.search(/one-time code|enter(?: this)?(?: one-time)? code|授权码|验证码/);
+  if (cueIndex >= 0) {
+    const codeMatch = text.slice(cueIndex).match(/[A-Z0-9]{6,}/);
+    return codeMatch?.[0];
+  }
+  return undefined;
+}
+
+function buildDeviceAuthJumpUrl(authUrl: string | undefined, deviceCode: string | undefined): string | undefined {
+  if (!authUrl) {
+    return undefined;
+  }
+  const normalizedCode = deviceCode?.trim();
+  if (!normalizedCode) {
+    return authUrl;
+  }
+  try {
+    const parsedUrl = new URL(authUrl);
+    if (!parsedUrl.searchParams.has('user_code') && !parsedUrl.searchParams.has('code')) {
+      parsedUrl.searchParams.set('user_code', normalizedCode);
+    }
+    return parsedUrl.toString();
+  } catch {
+    const separator = authUrl.includes('?') ? '&' : '?';
+    return `${authUrl}${separator}user_code=${encodeURIComponent(normalizedCode)}`;
+  }
+}
+
+function formatLoginConfigState(value: boolean | undefined): string {
+  if (value === true) {
+    return '已写入';
+  }
+  if (value === false) {
+    return '未发现';
+  }
+  return '未知';
+}
+
+function formatLoginAuthState(value: boolean | undefined): string {
+  if (value === true) {
+    return '已发现';
+  }
+  if (value === false) {
+    return '未发现';
+  }
+  return '未知';
 }
 
 export function buildFeishuOpenCodeLoginChoiceMessage(): string {
@@ -1361,6 +1557,14 @@ export function buildFeishuApiLoginResultMessage(input: {
                 base_url: input.baseUrl ?? '',
                 model: input.model ?? '',
                 reasoning_effort: input.reasoningEffort ?? '',
+              },
+            },
+            {
+              label: '重新选择登录',
+              value: {
+                gateway_cmd: '/login',
+                command: '/login',
+                text: '/login',
               },
             },
           ]),

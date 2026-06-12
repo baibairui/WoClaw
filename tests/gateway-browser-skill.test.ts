@@ -4,7 +4,11 @@ import path from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { installGatewayBrowserSkill, renderGatewayBrowserSkill, syncManagedGlobalSkills } from '../src/services/gateway-browser-skill.js';
+import {
+  installGatewayBrowserSkill,
+  renderGatewayBrowserSkill,
+  syncManagedGlobalSkills,
+} from '../src/services/gateway-browser-skill.js';
 
 describe('gateway-browser-skill', () => {
   it('installs gateway browser skill in workspace local skills', () => {
@@ -45,6 +49,37 @@ describe('gateway-browser-skill', () => {
     expect(agentsMd).toContain('自带脚本完成操作');
     expect(agentsMd).not.toContain('browser_* MCP 工具');
     expect(agentsMd).not.toContain('@playwright/mcp');
+  });
+
+  it('dedupes repeated browser managed sections in AGENTS.md', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-browser-skill-'));
+    fs.writeFileSync(
+      path.join(dir, 'AGENTS.md'),
+      [
+        '# AGENTS.md',
+        '',
+        '<!-- gateway:browser-rule:start -->',
+        '旧浏览器规则 A',
+        '<!-- gateway:browser-rule:end -->',
+        '',
+        '<!-- gateway:browser-rule:start -->',
+        '旧浏览器规则 B',
+        '<!-- gateway:browser-rule:end -->',
+        '',
+        '<!-- gateway:browser-rule:start -->',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    installGatewayBrowserSkill(dir);
+
+    const agentsMd = fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8');
+    expect(agentsMd.match(/<!-- gateway:browser-rule:start -->/g)?.length).toBe(1);
+    expect(agentsMd.match(/<!-- gateway:browser-rule:end -->/g)?.length).toBe(1);
+    expect(agentsMd).toContain('./.codex/skills/gateway-browser/SKILL.md');
+    expect(agentsMd).not.toContain('旧浏览器规则 A');
+    expect(agentsMd).not.toContain('旧浏览器规则 B');
   });
 
   it('renders browser workflow with evidence and safety rules', () => {
@@ -93,25 +128,21 @@ describe('gateway-browser-skill', () => {
     expect(fs.existsSync(path.join(rootB, 'gateway-browser', 'SKILL.md'))).toBe(true);
   });
 
-  it('uses the gateway runtime home for default managed global skill roots', async () => {
-    const gatewayRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-browser-root-'));
-    const originalGatewayRootDir = process.env.GATEWAY_ROOT_DIR;
+  it('uses configured runner-home roots for default managed global skill roots', async () => {
+    const runnerHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-browser-runner-home-'));
+    const codexRoot = path.join(runnerHome, '.codex', 'skills');
+    const agentsRoot = path.join(runnerHome, '.agents', 'skills');
 
-    process.env.GATEWAY_ROOT_DIR = gatewayRoot;
     vi.resetModules();
     const mod = await import('../src/services/gateway-browser-skill.js');
-
     try {
+      mod.configureManagedGlobalSkillRoots([codexRoot, agentsRoot]);
       mod.syncManagedGlobalSkills();
 
-      expect(fs.existsSync(path.join(gatewayRoot, '.codex-runtime', 'home', '.codex', 'skills', 'gateway-browser', 'SKILL.md'))).toBe(true);
-      expect(fs.existsSync(path.join(gatewayRoot, '.codex-runtime', 'home', '.agents', 'skills', 'gateway-browser', 'SKILL.md'))).toBe(true);
+      expect(fs.existsSync(path.join(codexRoot, 'gateway-browser', 'SKILL.md'))).toBe(true);
+      expect(fs.existsSync(path.join(agentsRoot, 'gateway-browser', 'SKILL.md'))).toBe(true);
     } finally {
-      if (originalGatewayRootDir === undefined) {
-        delete process.env.GATEWAY_ROOT_DIR;
-      } else {
-        process.env.GATEWAY_ROOT_DIR = originalGatewayRootDir;
-      }
+      mod.configureManagedGlobalSkillRoots(undefined);
     }
   });
 });

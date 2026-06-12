@@ -1,5 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { upsertManagedSection } from './agents-managed-sections.js';
+import {
+  configureManagedGlobalSkillRoots,
+  defaultGlobalSkillRoots,
+} from './gateway-browser-skill.js';
 
 import {
   MACOS_GUI_SKILL_MARKDOWN,
@@ -9,6 +14,7 @@ import {
 
 export const MACOS_GUI_SKILL_NAME = 'macos-gui-skill';
 export const GATEWAY_DESKTOP_SKILL_NAME = MACOS_GUI_SKILL_NAME;
+export { configureManagedGlobalSkillRoots };
 
 const DESKTOP_RULE_START = '<!-- gateway:desktop-rule:start -->';
 const DESKTOP_RULE_END = '<!-- gateway:desktop-rule:end -->';
@@ -93,36 +99,4 @@ function writeIfChanged(filePath: string, content: string): void {
   }
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content, 'utf8');
-}
-
-function defaultGlobalSkillRoots(): string[] {
-  const gatewayRootDir = process.env.GATEWAY_ROOT_DIR?.trim()
-    ? path.resolve(process.env.GATEWAY_ROOT_DIR.trim())
-    : path.resolve(process.cwd());
-  const runtimeHomeDir = path.join(gatewayRootDir, '.codex-runtime', 'home');
-  return [
-    path.join(runtimeHomeDir, '.codex', 'skills'),
-    path.join(runtimeHomeDir, '.agents', 'skills'),
-  ];
-}
-
-function upsertManagedSection(
-  content: string,
-  startMarker: string,
-  endMarker: string,
-  section: string,
-  legacyPatterns: RegExp[],
-): string {
-  let next = content;
-  for (const pattern of legacyPatterns) {
-    next = next.replace(pattern, '\n');
-  }
-  const start = next.indexOf(startMarker);
-  const end = next.indexOf(endMarker);
-  if (start >= 0 && end > start) {
-    const before = next.slice(0, start).trimEnd();
-    const after = next.slice(end + endMarker.length).trimStart();
-    return [before, section, after].filter(Boolean).join('\n\n');
-  }
-  return `${next.trimEnd()}\n\n${section}\n`;
 }

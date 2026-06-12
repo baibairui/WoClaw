@@ -4,9 +4,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { createLogger } from '../utils/logger.js';
-import { buildCodexSpawnSpec, type CodexWorkdirIsolationMode } from './codex-bwrap.js';
+import { buildCodexSpawnSpec, type CodexWorkdirIsolationMode, type SkillRuntimePolicy } from './codex-bwrap.js';
 import { getCliProviderSpec, isExecutableAvailable, resolveCodexBin, resolveOpenCodeBin, type CliProvider } from './cli-provider.js';
-import { CodexAppServerClient, type CodexTurnCompletion, type CodexTurnInputItem } from './codex-app-server-client.js';
+import { CodexAppServerClient, type CodexServerRequestHandler, type CodexThreadConfig, type CodexThreadGoal, type CodexTurnCompletion, type CodexTurnInputItem } from './codex-app-server-client.js';
 
 const log = createLogger('CodexRunner');
 const execFileAsync = promisify(execFile);
@@ -34,6 +34,7 @@ export interface CodexRunInput {
   /** 一旦收到 thread.started 就立刻回调，便于上层先持久化新会话 */
   onThreadStarted?: (threadId: string) => void;
   gatewayPublicBaseUrl?: string;
+  skillPolicy?: SkillRuntimePolicy;
 }
 
 export interface CodexRunResult {
@@ -54,6 +55,7 @@ export interface CodexReviewInput {
   search?: boolean;
   workdir?: string;
   onMessage?: (text: string) => void;
+  skillPolicy?: SkillRuntimePolicy;
 }
 
 export interface CodexLoginInput {
@@ -80,14 +82,32 @@ interface CodexRunnerOptions {
   gatewayPublicBaseUrl?: string;
   /** 'full-auto' (沙箱) 或 'none' (无沙箱) */
   sandbox?: 'full-auto' | 'none';
-  workdirIsolation?: CodexWorkdirIsolationMode;
   codexHomeDir?: string;
   codexRunTransport?: 'cli' | 'app-server';
+  workdirIsolation?: CodexWorkdirIsolationMode;
+  nativeToolHandler?: CodexServerRequestHandler;
 }
 
 const DEFAULT_TIMEOUT_MIN_MS = 180_000;
 const DEFAULT_TIMEOUT_MAX_MS = 900_000;
 const DEFAULT_TIMEOUT_PER_CHAR_MS = 80;
+
+export function resolveServiceWorkdirIsolation(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform | string = process.platform,
+): CodexWorkdirIsolationMode {
+  const raw = env.CODEX_WORKDIR_ISOLATION?.trim().toLowerCase();
+  if (!raw) {
+    return platform === 'linux' ? 'bwrap' : 'off';
+  }
+  if (raw === 'off' || raw === 'none' || raw === 'false') {
+    return 'off';
+  }
+  if (raw === 'bwrap') {
+    return 'bwrap';
+  }
+  throw new Error(`invalid CODEX_WORKDIR_ISOLATION: ${raw}`);
+}
 
 export function parseCodexJsonl(raw: string): ParsedCodexOutput {
   let threadId: string | undefined;
@@ -140,9 +160,10 @@ export class CodexRunner {
   private readonly gatewayRootDir?: string;
   private readonly gatewayPublicBaseUrl?: string;
   private readonly sandbox: 'full-auto' | 'none';
-  private readonly workdirIsolation: CodexWorkdirIsolationMode;
   private readonly codexHomeDir?: string;
   private readonly codexRunTransport: 'cli' | 'app-server';
+  private readonly workdirIsolation: CodexWorkdirIsolationMode;
+  private readonly nativeToolHandler?: CodexServerRequestHandler;
 
   constructor(options: CodexRunnerOptions = {}) {
     this.provider = options.provider ?? 'codex';
@@ -168,9 +189,10 @@ export class CodexRunner {
     this.gatewayRootDir = options.gatewayRootDir?.trim() || undefined;
     this.gatewayPublicBaseUrl = options.gatewayPublicBaseUrl?.trim() || undefined;
     this.sandbox = options.sandbox ?? 'full-auto';
-    this.workdirIsolation = options.workdirIsolation ?? 'off';
     this.codexHomeDir = options.codexHomeDir?.trim() || undefined;
     this.codexRunTransport = options.codexRunTransport ?? 'app-server';
+    this.workdirIsolation = options.workdirIsolation ?? resolveServiceWorkdirIsolation();
+    this.nativeToolHandler = options.nativeToolHandler;
     log.debug('CodexRunner 构造完成', {
       codexBin: this.codexBin,
       provider: this.provider,
@@ -186,6 +208,7 @@ export class CodexRunner {
       workdirIsolation: this.workdirIsolation,
       codexHomeDir: this.codexHomeDir ?? '(system HOME)',
       codexRunTransport: this.codexRunTransport,
+      nativeToolHandler: this.nativeToolHandler ? 'enabled' : 'disabled',
     });
   }
 
@@ -230,6 +253,7 @@ export class CodexRunner {
       onThreadStarted: input.onThreadStarted,
       initialThreadId: input.threadId,
       requireThreadId: true,
+      skillPolicy: input.skillPolicy,
       logMeta: {
         mode: 'exec',
         isResume: !!input.threadId,
@@ -275,6 +299,7 @@ export class CodexRunner {
       workdir,
       onMessage: input.onMessage,
       requireThreadId: false,
+      skillPolicy: input.skillPolicy,
       logMeta: {
         mode: 'review',
         reviewMode: input.mode,
@@ -373,6 +398,7 @@ export class CodexRunner {
     onThreadStarted?: (threadId: string) => void;
     initialThreadId?: string;
     requireThreadId: boolean;
+    skillPolicy?: SkillRuntimePolicy;
     logMeta?: Record<string, unknown>;
   }): { result: Promise<{ rawOutput: string; threadId?: string }>; stop: (reason: string) => Promise<boolean> } {
     if (this.provider === 'opencode') {
@@ -405,6 +431,7 @@ export class CodexRunner {
         env: options.env ?? process.env,
         isolationMode: this.workdirIsolation,
         codexHomeDir: this.codexHomeDir,
+        skillPolicy: options.skillPolicy,
       });
 
       const child = spawn(spawnSpec.command, spawnSpec.args, {
@@ -592,22 +619,11 @@ export class CodexRunner {
 
   private runWithAppServer(input: CodexRunInput, effectiveWorkdir: string): ControlledCodexRun {
     const appServerCwd = this.resolveAppServerCwd(effectiveWorkdir);
-    const env = buildCodexChildEnv(process.env, {
+    const env = this.buildAppServerEnv({
       reminderToolContext: input.reminderToolContext,
-      browserAutomation: this.browserAutomation,
-      gatewayRootDir: this.gatewayRootDir,
       gatewayPublicBaseUrl: input.gatewayPublicBaseUrl ?? this.gatewayPublicBaseUrl,
       gatewayUserId: input.gatewayUserId,
-      internalApiToken: this.internalApiToken,
-      internalApiBaseUrl: this.internalApiBaseUrl,
     });
-    if (this.codexHomeDir?.trim()) {
-      const resolvedHome = this.codexHomeDir.trim();
-      env.HOME = resolvedHome;
-      env.XDG_CONFIG_HOME = `${resolvedHome}/.config`;
-      env.XDG_CACHE_HOME = `${resolvedHome}/.cache`;
-      env.XDG_DATA_HOME = `${resolvedHome}/.local/share`;
-    }
 
     const promptItems = buildCodexTurnInputItems(input.prompt);
     const effectiveTimeoutMs = this.resolveTimeoutMs(input.prompt);
@@ -631,9 +647,16 @@ export class CodexRunner {
       codexBin: this.codexBin,
       cwd: effectiveWorkdir,
       env,
-      isolationMode: this.workdirIsolation,
       codexHomeDir: this.codexHomeDir,
-      sessionSource: 'exec',
+      workdirIsolation: this.workdirIsolation,
+      skillPolicy: input.skillPolicy,
+      onServerRequest: async (request) => {
+        rawOutput += `${JSON.stringify(request)}\n`;
+        refreshIdleTimeout();
+        const response = await this.nativeToolHandler?.(request);
+        refreshIdleTimeout();
+        return response;
+      },
       onNotification: (notification) => {
         rawOutput += `${JSON.stringify(notification)}\n`;
         refreshIdleTimeout();
@@ -650,6 +673,15 @@ export class CodexRunner {
           if (typeof turn?.id === 'string') {
             observedTurnId = turn.id;
           }
+          return;
+        }
+        if (notification.method === 'thread/goal/updated') {
+          const goal = parseCodexThreadGoal(notification.params?.goal);
+          input.onMessage?.(goal ? formatCodexGoalUpdatedMessage(goal) : '✅ 已更新 Codex 目标。');
+          return;
+        }
+        if (notification.method === 'thread/goal/cleared') {
+          input.onMessage?.('✅ 已清除当前 Codex 目标。');
           return;
         }
         if (notification.method === 'item/agentMessage/delta') {
@@ -703,16 +735,7 @@ export class CodexRunner {
         await client.initialize();
         refreshIdleTimeout();
 
-        const sandboxMode: 'workspace-write' | 'danger-full-access' = this.sandbox === 'none'
-          ? 'danger-full-access'
-          : 'workspace-write';
-        const threadConfig = {
-          cwd: appServerCwd,
-          model: input.model,
-          sandbox: sandboxMode,
-          approvalPolicy: 'never' as const,
-          personality: 'pragmatic' as const,
-        };
+        const threadConfig = this.buildAppServerThreadConfig(input.model, effectiveWorkdir);
 
         if (input.threadId?.trim()) {
           const resumed = await client.resumeThread(input.threadId.trim(), threadConfig);
@@ -773,8 +796,45 @@ export class CodexRunner {
     };
   }
 
-  private resolveAppServerCwd(workdir: string): string {
-    return this.workdirIsolation === 'bwrap' ? '/workspace' : workdir;
+  private buildAppServerThreadConfig(model: string | undefined, workdir?: string): CodexThreadConfig {
+    return {
+      cwd: this.resolveAppServerCwd(workdir),
+      model,
+      sandbox: this.sandbox === 'none' ? 'danger-full-access' : 'workspace-write',
+      approvalPolicy: 'never',
+      personality: 'pragmatic',
+    };
+  }
+
+  private buildAppServerEnv(input: {
+    reminderToolContext?: CodexRunInput['reminderToolContext'];
+    gatewayPublicBaseUrl?: string;
+    gatewayUserId?: string;
+  }): NodeJS.ProcessEnv {
+    const env = buildCodexChildEnv(process.env, {
+      reminderToolContext: input.reminderToolContext,
+      gatewayRootDir: this.gatewayRootDir,
+      gatewayPublicBaseUrl: input.gatewayPublicBaseUrl ?? this.gatewayPublicBaseUrl,
+      gatewayUserId: input.gatewayUserId,
+    });
+    delete env.GATEWAY_BROWSER_API_BASE;
+    delete env.GATEWAY_INTERNAL_API_BASE;
+    delete env.GATEWAY_INTERNAL_API_TOKEN;
+    if (this.codexHomeDir?.trim()) {
+      const resolvedHome = this.codexHomeDir.trim();
+      env.HOME = resolvedHome;
+      env.XDG_CONFIG_HOME = `${resolvedHome}/.config`;
+      env.XDG_CACHE_HOME = `${resolvedHome}/.cache`;
+      env.XDG_DATA_HOME = `${resolvedHome}/.local/share`;
+    }
+    return env;
+  }
+
+  private resolveAppServerCwd(workdir?: string): string {
+    if (this.workdirIsolation === 'bwrap') {
+      return '/workspace';
+    }
+    return workdir?.trim() || this.workdir;
   }
 
   private assertExecutableAvailable(env: NodeJS.ProcessEnv): void {
@@ -1026,6 +1086,50 @@ function maskThreadId(threadId?: string): string {
     return '****';
   }
   return `${threadId.slice(0, 4)}...${threadId.slice(-4)}`;
+}
+
+function parseCodexThreadGoal(value: unknown): CodexThreadGoal | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+  const goal = value as Record<string, unknown>;
+  if (typeof goal.threadId !== 'string' || typeof goal.objective !== 'string' || typeof goal.status !== 'string') {
+    return undefined;
+  }
+  return {
+    threadId: goal.threadId,
+    objective: goal.objective,
+    status: goal.status as CodexThreadGoal['status'],
+    tokenBudget: typeof goal.tokenBudget === 'number' ? goal.tokenBudget : null,
+    tokensUsed: typeof goal.tokensUsed === 'number' ? goal.tokensUsed : 0,
+    timeUsedSeconds: typeof goal.timeUsedSeconds === 'number' ? goal.timeUsedSeconds : 0,
+    createdAt: typeof goal.createdAt === 'number' ? goal.createdAt : 0,
+    updatedAt: typeof goal.updatedAt === 'number' ? goal.updatedAt : 0,
+  };
+}
+
+function formatCodexGoalUpdatedMessage(goal: CodexThreadGoal): string {
+  const budget = goal.tokenBudget === null ? '不限制' : String(goal.tokenBudget);
+  return [
+    `✅ 已更新 Codex 目标：${goal.objective}`,
+    `状态：${formatCodexGoalStatus(goal.status)}`,
+    `Token 预算：${budget}`,
+  ].join('\n');
+}
+
+function formatCodexGoalStatus(status: CodexThreadGoal['status']): string {
+  switch (status) {
+    case 'active':
+      return '进行中';
+    case 'paused':
+      return '已暂停';
+    case 'budgetLimited':
+      return '预算受限';
+    case 'complete':
+      return '已完成';
+    default:
+      return status;
+  }
 }
 
 function handleCodexLine(

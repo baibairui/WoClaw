@@ -113,9 +113,10 @@ FEISHU_LONG_CONNECTION=true
 CODEX_BIN=codex
 CODEX_WORKDIR=/absolute/path/to/agent-root
 CODEX_SANDBOX=full-auto
-CODEX_WORKDIR_ISOLATION=off
 RUNNER_ENABLED=true
 ```
+
+Agent runs always use isolated `bwrap` workspaces now; `CODEX_WORKDIR_ISOLATION` is no longer configurable.
 
 WeCom:
 

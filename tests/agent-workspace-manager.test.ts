@@ -97,6 +97,48 @@ describe('AgentWorkspaceManager', () => {
     expect(soul).toContain('- Role: System Memory Steward');
   });
 
+  it('repairs root workspace AGENTS.md by removing legacy references', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-workspace-root-repair-'));
+    const manager = new AgentWorkspaceManager(dir);
+    fs.writeFileSync(
+      path.join(dir, 'AGENTS.md'),
+      [
+        '# Root Agent',
+        '',
+        '- `./TOOLS.md`',
+        '- `./memory/identity.md`',
+        '- `./shared-memory/identity.md`',
+        '- browser-playbook.md',
+        '- feishu-ops-playbook.md',
+      ].join('\n'),
+      'utf8',
+    );
+
+    manager.repairWorkspaceScaffold(dir);
+
+    const agentsMd = fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8');
+    expect(agentsMd).not.toContain('./TOOLS.md');
+    expect(agentsMd).not.toContain('./memory/identity.md');
+    expect(agentsMd).not.toContain('./shared-memory/identity.md');
+    expect(agentsMd).not.toContain('browser-playbook');
+    expect(agentsMd).not.toContain('feishu-ops-playbook');
+  });
+
+  it('repairs the root workspace as a managed default agent without overwriting AGENTS.md', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-workspace-root-managed-'));
+    const manager = new AgentWorkspaceManager(dir);
+    fs.writeFileSync(path.join(dir, 'AGENTS.md'), '# Root Agent Rules\n', 'utf8');
+
+    manager.repairWorkspaceScaffold(dir);
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, '.codex', 'workspace.json'), 'utf8')) as Record<string, unknown>;
+    expect(fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8')).toContain('# Root Agent Rules');
+    expect(fs.existsSync(path.join(dir, 'README.md'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'SOUL.md'))).toBe(true);
+    expect(manifest.agentId).toBe('default');
+    expect(manifest.agentName).toBe('默认Agent');
+  });
+
   it('creates minimal onboarding scaffolds without legacy checklist files', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-workspace-'));
     const manager = new AgentWorkspaceManager(dir);

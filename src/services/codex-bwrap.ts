@@ -4,6 +4,11 @@ import { hasCliHomeAuth, hasCliHomeConfig, type CliProvider } from './cli-provid
 
 export type CodexWorkdirIsolationMode = 'off' | 'bwrap';
 
+export interface SkillRuntimePolicy {
+  disabledGlobalSkills?: string[];
+  disabledAgentSkills?: string[];
+}
+
 export interface CodexSpawnSpec {
   command: string;
   args: string[];
@@ -25,6 +30,7 @@ interface BuildCodexSpawnSpecInput {
   env: NodeJS.ProcessEnv;
   isolationMode: CodexWorkdirIsolationMode;
   codexHomeDir?: string;
+  skillPolicy?: SkillRuntimePolicy;
 }
 
 const DEFAULT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
@@ -59,7 +65,7 @@ export function buildCodexSpawnSpec(input: BuildCodexSpawnSpecInput): CodexSpawn
 
   const workspaceDir = path.resolve(input.cwd);
   const runtimeHomeDir = path.join(workspaceDir, RUNTIME_HOME_DIR);
-  syncCodexRuntimeHome(input.codexHomeDir, runtimeHomeDir, hostHomeDir);
+  syncCodexRuntimeHome(input.codexHomeDir, runtimeHomeDir, hostHomeDir, gatewayRootDir, input.skillPolicy);
   removeStaleWorkspaceGitSshOverrides(workspaceDir, runtimeHomeDir);
 
   return {
@@ -74,6 +80,7 @@ export function buildCodexSpawnSpec(input: BuildCodexSpawnSpecInput): CodexSpawn
       gatewayRootDir,
       input.env[EXTRA_READS_ENV_NAME],
       shellBinary,
+      input.skillPolicy,
     ),
     cwd: workspaceDir,
     env: buildIsolatedEnv(hostEnv, runtimeHomeDir, gatewayRootDir, provider, shellBinary),
@@ -90,9 +97,11 @@ function buildBubblewrapArgs(
   gatewayRootDir: string | undefined,
   extraReadsRaw: string | undefined,
   shellBinary: string | undefined,
+  skillPolicy: SkillRuntimePolicy | undefined,
 ): string[] {
   const sandboxArgs = normalizeArgsForWorkspace(args, workspaceDir);
   const readonlyMounts = collectReadonlyMounts(runtimeHomeDir, hostHomeDir, extraReadsRaw);
+  const disabledWorkspaceSkillMounts = collectDisabledWorkspaceSkillMounts(workspaceDir, skillPolicy);
   const result = [
     '--die-with-parent',
     '--new-session',
@@ -121,6 +130,10 @@ function buildBubblewrapArgs(
     runtimeHomeDir,
     RUNTIME_HOME_MOUNT_DIR,
   );
+
+  for (const sandboxTarget of disabledWorkspaceSkillMounts) {
+    result.push('--tmpfs', sandboxTarget);
+  }
 
   for (const mount of readonlyMounts) {
     result.push('--ro-bind', mount.source, mount.sandboxTarget);
@@ -394,7 +407,13 @@ function ensureSandboxDirTree(result: string[], createdDirs: Set<string>, dirPat
   }
 }
 
-function syncCodexRuntimeHome(sourceDir: string | undefined, targetDir: string, hostHomeDir: string | undefined): void {
+function syncCodexRuntimeHome(
+  sourceDir: string | undefined,
+  targetDir: string,
+  hostHomeDir: string | undefined,
+  _gatewayRootDir: string | undefined,
+  skillPolicy: SkillRuntimePolicy | undefined,
+): void {
   fs.mkdirSync(targetDir, { recursive: true });
   fs.mkdirSync(path.join(targetDir, '.config'), { recursive: true });
   fs.mkdirSync(path.join(targetDir, '.cache'), { recursive: true });
@@ -404,6 +423,7 @@ function syncCodexRuntimeHome(sourceDir: string | undefined, targetDir: string, 
   fs.mkdirSync(path.join(targetDir, 'shell_snapshots'), { recursive: true });
 
   syncHostHomeReadonlyFiles(targetDir, hostHomeDir);
+  syncGlobalSkillsToCanonicalRuntimeRoot(sourceDir, targetDir, skillPolicy);
 
   if (!sourceDir) {
     return;
@@ -429,6 +449,199 @@ function syncCodexRuntimeHome(sourceDir: string | undefined, targetDir: string, 
     fs.mkdirSync(path.dirname(targetFile), { recursive: true });
     fs.copyFileSync(sourceFile, targetFile);
   }
+
+}
+
+function syncGlobalSkillsToCanonicalRuntimeRoot(
+  sourceDir: string | undefined,
+  targetDir: string,
+  skillPolicy: SkillRuntimePolicy | undefined,
+): void {
+  const targetSkillDir = path.join(targetDir, '.codex', 'skills');
+  const legacyTargetSkillDir = path.join(targetDir, '.agents', 'skills');
+  fs.rmSync(legacyTargetSkillDir, { recursive: true, force: true });
+
+  const sourceRoots = sourceDir
+    ? [
+        path.join(sourceDir, '.codex', 'skills'),
+        path.join(sourceDir, '.agents', 'skills'),
+      ]
+    : [];
+  const sourceEntries = collectCanonicalGlobalSkillEntries(sourceRoots, skillPolicy);
+  if (sourceEntries.length === 0) {
+    fs.rmSync(targetSkillDir, { recursive: true, force: true });
+    return;
+  }
+
+  fs.mkdirSync(targetSkillDir, { recursive: true });
+  const desiredNames = new Set(sourceEntries.map((entry) => entry.targetEntryName));
+  for (const entryName of fs.readdirSync(targetSkillDir)) {
+    if (!desiredNames.has(entryName)) {
+      fs.rmSync(path.join(targetSkillDir, entryName), { recursive: true, force: true });
+    }
+  }
+
+  for (const entry of sourceEntries) {
+    copyPathRecursive(entry.sourcePath, path.join(targetSkillDir, entry.targetEntryName));
+  }
+}
+
+function collectCanonicalGlobalSkillEntries(
+  sourceRoots: string[],
+  skillPolicy: SkillRuntimePolicy | undefined,
+): Array<{ sourcePath: string; targetEntryName: string }> {
+  const disabledGlobalSkills = buildDisabledSkillSet(skillPolicy?.disabledGlobalSkills);
+  const output: Array<{ sourcePath: string; targetEntryName: string }> = [];
+  const seen = new Set<string>();
+
+  for (const sourceRoot of sourceRoots) {
+    if (!fs.existsSync(sourceRoot) || !fs.statSync(sourceRoot).isDirectory()) {
+      continue;
+    }
+    for (const entryName of fs.readdirSync(sourceRoot)) {
+      const sourcePath = path.join(sourceRoot, entryName);
+      const key = canonicalSkillEntryKey(sourcePath, entryName);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      if (entryMatchesDisabledSkill(sourcePath, entryName, disabledGlobalSkills)) {
+        continue;
+      }
+      output.push({
+        sourcePath,
+        targetEntryName: entryName,
+      });
+    }
+  }
+
+  return output;
+}
+
+function collectDisabledWorkspaceSkillMounts(
+  workspaceDir: string,
+  skillPolicy: SkillRuntimePolicy | undefined,
+): string[] {
+  const disabledAgentSkills = buildDisabledSkillSet(skillPolicy?.disabledAgentSkills);
+  if (disabledAgentSkills.size === 0) {
+    return [];
+  }
+
+  const output: string[] = [];
+  for (const relativeRoot of [['.codex', 'skills'], ['.agents', 'skills']] as const) {
+    const sourceRoot = path.join(workspaceDir, ...relativeRoot);
+    if (!fs.existsSync(sourceRoot) || !fs.statSync(sourceRoot).isDirectory()) {
+      continue;
+    }
+    for (const entryName of fs.readdirSync(sourceRoot)) {
+      const sourcePath = path.join(sourceRoot, entryName);
+      if (!entryMatchesDisabledSkill(sourcePath, entryName, disabledAgentSkills)) {
+        continue;
+      }
+      output.push(path.posix.join('/workspace', ...relativeRoot, entryName));
+    }
+  }
+
+  return output;
+}
+
+function canonicalSkillEntryKey(entryPath: string, entryName: string): string {
+  const stat = fs.statSync(entryPath);
+  if (!stat.isDirectory()) {
+    return `entry:${normalizeSkillName(entryName)}`;
+  }
+  const skillName = readSkillMetadataName(entryPath);
+  return `skill:${normalizeSkillName(skillName || entryName)}`;
+}
+
+function entryMatchesDisabledSkill(
+  entryPath: string,
+  entryName: string,
+  disabledSkills: Set<string>,
+): boolean {
+  if (disabledSkills.size === 0) {
+    return false;
+  }
+  if (disabledSkills.has(normalizeSkillName(entryName))) {
+    return true;
+  }
+  try {
+    const stat = fs.statSync(entryPath);
+    if (!stat.isDirectory()) {
+      return false;
+    }
+    const skillName = readSkillMetadataName(entryPath);
+    return skillName ? disabledSkills.has(normalizeSkillName(skillName)) : false;
+  } catch {
+    return false;
+  }
+}
+
+function readSkillMetadataName(skillDir: string): string | undefined {
+  const skillFile = path.join(skillDir, 'SKILL.md');
+  if (!fs.existsSync(skillFile) || !fs.statSync(skillFile).isFile()) {
+    return undefined;
+  }
+  const content = fs.readFileSync(skillFile, 'utf8');
+  const trimmed = content.trimStart();
+  if (trimmed.startsWith('---')) {
+    const lines = trimmed.split('\n');
+    for (let i = 1; i < lines.length; i += 1) {
+      const line = lines[i].trim();
+      if (line === '---') {
+        break;
+      }
+      const name = parseSkillNameLine(line);
+      if (name) {
+        return name;
+      }
+    }
+    return undefined;
+  }
+
+  for (const line of content.split('\n')) {
+    const name = parseSkillNameLine(line.trim());
+    if (name) {
+      return name;
+    }
+  }
+  return undefined;
+}
+
+function parseSkillNameLine(line: string): string | undefined {
+  if (!line.startsWith('name:')) {
+    return undefined;
+  }
+  const raw = line.slice('name:'.length).trim();
+  return raw.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1').trim() || undefined;
+}
+
+function buildDisabledSkillSet(skills: string[] | undefined): Set<string> {
+  return new Set((skills ?? []).map(normalizeSkillName).filter(Boolean));
+}
+
+function normalizeSkillName(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+function copyPathRecursive(sourcePath: string, targetPath: string): void {
+  const stat = fs.statSync(sourcePath);
+  if (stat.isDirectory()) {
+    fs.mkdirSync(targetPath, { recursive: true });
+    const sourceEntries = new Set(fs.readdirSync(sourcePath));
+    for (const entryName of fs.existsSync(targetPath) ? fs.readdirSync(targetPath) : []) {
+      if (!sourceEntries.has(entryName)) {
+        fs.rmSync(path.join(targetPath, entryName), { recursive: true, force: true });
+      }
+    }
+    for (const entryName of sourceEntries) {
+      copyPathRecursive(path.join(sourcePath, entryName), path.join(targetPath, entryName));
+    }
+    return;
+  }
+
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  fs.copyFileSync(sourcePath, targetPath);
 }
 
 function syncHostHomeReadonlyFiles(targetDir: string, hostHomeDir: string | undefined): void {

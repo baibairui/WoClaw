@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { upsertManagedSection } from './agents-managed-sections.js';
 
 const SOCIAL_RULE_START = '<!-- gateway:social-intel:start -->';
 const SOCIAL_RULE_END = '<!-- gateway:social-intel:end -->';
@@ -283,26 +284,6 @@ function ensureAgentsSocialRule(workspaceDir: string): void {
   }
 }
 
-function upsertManagedSection(
-  content: string,
-  startMarker: string,
-  endMarker: string,
-  section: string,
-  legacyPatterns: RegExp[],
-): string {
-  let next = content;
-  for (const pattern of legacyPatterns) {
-    next = next.replace(pattern, '\n');
-  }
-  const start = next.indexOf(startMarker);
-  const end = next.indexOf(endMarker);
-  if (start >= 0 && end > start) {
-    const before = next.slice(0, start).trimEnd();
-    const after = next.slice(end + endMarker.length).trimStart();
-    return [before, section, after].filter(Boolean).join('\n\n');
-  }
-  return `${next.trimEnd()}\n\n${section}\n`;
-}
 
 function writeIfChanged(filePath: string, content: string): void {
   const existing = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : undefined;

@@ -141,25 +141,21 @@ describe('gateway-desktop-skill', () => {
     expect(fs.existsSync(path.join(rootB, 'macos-gui-skill', 'SKILL.md'))).toBe(true);
   });
 
-  it('uses the gateway runtime home for default managed global desktop skill roots', async () => {
-    const gatewayRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-desktop-root-'));
-    const originalGatewayRootDir = process.env.GATEWAY_ROOT_DIR;
+  it('uses configured runner-home roots for default managed global desktop skill roots', async () => {
+    const runnerHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-desktop-runner-home-'));
+    const codexRoot = path.join(runnerHome, '.codex', 'skills');
+    const agentsRoot = path.join(runnerHome, '.agents', 'skills');
 
-    process.env.GATEWAY_ROOT_DIR = gatewayRoot;
     vi.resetModules();
     const mod = await import('../src/services/gateway-desktop-skill.js');
-
     try {
+      mod.configureManagedGlobalSkillRoots([codexRoot, agentsRoot]);
       mod.syncManagedGlobalDesktopSkills();
 
-      expect(fs.existsSync(path.join(gatewayRoot, '.codex-runtime', 'home', '.codex', 'skills', 'macos-gui-skill', 'SKILL.md'))).toBe(true);
-      expect(fs.existsSync(path.join(gatewayRoot, '.codex-runtime', 'home', '.agents', 'skills', 'macos-gui-skill', 'SKILL.md'))).toBe(true);
+      expect(fs.existsSync(path.join(codexRoot, 'macos-gui-skill', 'SKILL.md'))).toBe(true);
+      expect(fs.existsSync(path.join(agentsRoot, 'macos-gui-skill', 'SKILL.md'))).toBe(true);
     } finally {
-      if (originalGatewayRootDir === undefined) {
-        delete process.env.GATEWAY_ROOT_DIR;
-      } else {
-        process.env.GATEWAY_ROOT_DIR = originalGatewayRootDir;
-      }
+      mod.configureManagedGlobalSkillRoots(undefined);
     }
   });
 });

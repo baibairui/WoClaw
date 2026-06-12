@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildFeishuApiLoginFormMessage,
   buildFeishuApiLoginResultMessage,
+  buildFeishuDeviceAuthProgressMessage,
   buildFeishuLoginChoiceMessage,
   buildFeishuOpenCodeInputFallbackMessage,
   buildFeishuOpenCodeOauthMessage,
@@ -85,6 +86,28 @@ describe('buildFeishuLoginChoiceMessage', () => {
     expect(buttons.some((item) => item.text?.content === 'API URL / Key 登录' && item.value?.gateway_action === 'codex_login.open_api_form')).toBe(true);
   });
 
+  it('shows existing cli auth state on the login choice card', () => {
+    const payload = buildFeishuLoginChoiceMessage({
+      provider: 'codex',
+      providerLabel: 'Codex',
+      supportsDeviceAuth: true,
+      authState: {
+        hasConfig: true,
+        hasAuth: false,
+        model: 'gpt-5.4',
+      },
+    });
+    const serialized = JSON.stringify(getCardElements(payload));
+
+    expect(serialized).toContain('当前通道');
+    expect(serialized).toContain('Codex');
+    expect(serialized).toContain('配置状态');
+    expect(serialized).toContain('已写入');
+    expect(serialized).toContain('授权状态');
+    expect(serialized).toContain('未发现');
+    expect(serialized).toContain('gpt-5.4');
+  });
+
   it('hides device auth when provider does not support it', () => {
     const payload = buildFeishuLoginChoiceMessage({
       provider: 'opencode',
@@ -113,6 +136,48 @@ describe('buildFeishuLoginChoiceMessage', () => {
     expect(buttons.some((item) => item.text?.content === 'OpenAI')).toBe(false);
     expect(buttons.some((item) => item.text?.content === 'Anthropic')).toBe(false);
     expect(buttons.filter((item) => item.text?.content === 'API URL / Key 登录')).toHaveLength(1);
+  });
+});
+
+describe('buildFeishuDeviceAuthProgressMessage', () => {
+  it('renders a direct open-link button when device auth output includes an authorization url', () => {
+    const payload = buildFeishuDeviceAuthProgressMessage({
+      providerLabel: 'Codex',
+      text: 'Open https://auth.example.com/device and enter code ABCD-EFGH',
+    });
+    const elements = getCardElements(payload);
+    const markdown = extractMarkdownContents(elements).join('\n');
+    const serialized = JSON.stringify(elements);
+    const buttons = extractButtons(elements);
+
+    expect(markdown).not.toContain('Open https://auth.example.com/device and enter code ABCD-EFGH');
+    expect(serialized).toContain('ABCD-EFGH');
+    expect(serialized).toContain('[点击打开授权页面](https://auth.example.com/device?user_code=ABCD-EFGH)');
+    expect(buttons.some((item) => item.text?.content === '打开授权链接' && item.multi_url?.url === 'https://auth.example.com/device?user_code=ABCD-EFGH')).toBe(true);
+    expect(buttons.some((item) => item.text?.content === '重新选择登录' && item.value?.gateway_cmd === '/login')).toBe(true);
+  });
+
+  it('hides raw cli output and carries the authorization code in the jump url', () => {
+    const payload = buildFeishuDeviceAuthProgressMessage({
+      providerLabel: 'Codex',
+      text: [
+        'Welcome to Codex [v0.128.0]',
+        "OpenAI's command-line coding agent",
+        'Follow these steps to sign in with ChatGPT using device code authorization:',
+        'Open this link in your browser and sign in to your accounthttps://auth.openai.com/codex/device',
+        'Enter this one-time code (expires in 15 minutes)EU4M-V3FW2Device codes are a common phishing target. Never share this code.',
+      ].join('\n'),
+    });
+    const elements = getCardElements(payload);
+    const serialized = JSON.stringify(elements);
+    const buttons = extractButtons(elements);
+
+    expect(serialized).not.toContain('CLI 提示');
+    expect(serialized).not.toContain('Welcome to Codex');
+    expect(serialized).not.toContain("OpenAI's command-line coding agent");
+    expect(serialized).toContain('EU4M-V3FW2');
+    expect(serialized).toContain('https://auth.openai.com/codex/device?user_code=EU4M-V3FW2');
+    expect(buttons.some((item) => item.text?.content === '打开授权链接' && item.multi_url?.url === 'https://auth.openai.com/codex/device?user_code=EU4M-V3FW2')).toBe(true);
   });
 });
 
@@ -282,6 +347,19 @@ describe('auth result and personal auth cards', () => {
     expect(buttons.some((item) => item.text?.content === '重新登录')).toBe(true);
   });
 
+  it('renders api login failure with a route back to the login choice card', () => {
+    const payload = buildFeishuApiLoginResultMessage({
+      ok: false,
+      baseUrl: 'notaurl',
+      model: 'gpt-5.3-codex',
+      message: 'invalid base_url',
+    });
+    const buttons = extractButtons(getCardElements(payload));
+
+    expect(buttons.some((item) => item.text?.content === '返回表单' && item.value?.gateway_action === 'codex_login.open_api_form')).toBe(true);
+    expect(buttons.some((item) => item.text?.content === '重新选择登录' && item.value?.gateway_cmd === '/login')).toBe(true);
+  });
+
   it('renders personal auth request as a guided card with one primary path', () => {
     const payload = buildFeishuUserAuthMessage({
       gatewayUserId: 'user_1',
@@ -305,5 +383,54 @@ describe('auth result and personal auth cards', () => {
     expect(markdown).toContain('**当前状态**');
     expect(markdown).toContain('**下一步**');
     expect(markdown).toContain('不是 /login 问题');
+  });
+});
+
+describe('formatCommandOutboundMessage', () => {
+  it('does not surface a repair-users command card anymore', () => {
+    const payload = formatCommandOutboundMessage('feishu', '/help', '可用命令（按功能分组，帮助页 3/3）：\n\n【工作区与运维】\n/review - 审查当前 agent 工作区变更');
+    const elements = getCardElements(payload);
+    const buttons = extractButtons(elements);
+    const markdown = extractMarkdownContents(elements).join('\n');
+
+    expect(markdown).not.toContain('用户工作区修复');
+    expect(buttons.some((item) => item.value?.gateway_cmd === '/repair-users')).toBe(false);
+  });
+
+  it('renders /goal as a focused goal-management card', () => {
+    const payload = formatCommandOutboundMessage('feishu', '/goal', [
+      '✅ 已设置目标：improve benchmark coverage',
+      '状态：active',
+      'Token 预算：不限制',
+    ].join('\n'));
+    const parsed = JSON.parse(payload) as {
+      content?: {
+        header?: {
+          title?: {
+            content?: string;
+          };
+        };
+      };
+    };
+    const elements = getCardElements(payload);
+    const markdown = extractMarkdownContents(elements).join('\n');
+    const serialized = JSON.stringify(elements);
+    const buttons = extractButtons(elements);
+
+    expect(parsed.content?.header?.title?.content).toBe('目标管理');
+    expect(markdown).toContain('improve benchmark coverage');
+    expect(serialized).toContain('Token 预算');
+    expect(buttons.some((item) => item.text?.content === '查看目标' && item.value?.gateway_cmd === '/goal')).toBe(true);
+    expect(buttons.some((item) => item.text?.content === '清除目标' && item.value?.gateway_cmd === '/goal clear')).toBe(true);
+  });
+
+  it('offers recovery actions for unknown commands', () => {
+    const payload = formatCommandOutboundMessage('feishu', '/wat', '未识别命令。输入 /help 查看可用命令。');
+    const elements = getCardElements(payload);
+    const buttons = extractButtons(elements);
+
+    expect(buttons.some((item) => item.text?.content === '查看帮助' && item.value?.gateway_cmd === '/help')).toBe(true);
+    expect(buttons.some((item) => item.text?.content === '当前会话' && item.value?.gateway_cmd === '/session')).toBe(true);
+    expect(buttons.some((item) => item.text?.content === 'Agent 列表' && item.value?.gateway_cmd === '/agents')).toBe(true);
   });
 });

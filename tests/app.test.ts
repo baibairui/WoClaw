@@ -1,4 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import http from 'node:http';
 
 import { createApp, dispatchFeishuCardActionEvent, dispatchFeishuMessageReceiveEvent } from '../src/app.js';
 
@@ -47,6 +48,11 @@ async function startTestServer(options?: {
       data?: Record<string, unknown>;
     }>;
   };
+  openAiCompat?: {
+    upstreamBaseUrl: string;
+    upstreamApiKey: string;
+    clientApiKey?: string;
+  };
 }) {
   const app = createApp({
     wecomEnabled: true,
@@ -67,6 +73,7 @@ async function startTestServer(options?: {
     feishuAppSecret: options?.feishuAppSecret,
     gatewayRootDir: options?.gatewayRootDir,
     browserAutomation: options?.browserAutomation,
+    openAiCompat: options?.openAiCompat,
     isDuplicateMessage: () => false,
     handleText: options?.handleText ?? (async () => undefined),
     handleFeishuCardAction: options?.handleFeishuCardAction,
@@ -80,6 +87,87 @@ async function startTestServer(options?: {
   const address = server.address();
   if (!address || typeof address === 'string') {
     throw new Error('failed to acquire test server address');
+  }
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function startJsonUpstream(handler: (input: {
+  method: string;
+  path: string;
+  headers: Headers;
+  body: Record<string, unknown>;
+}) => Promise<{
+  status?: number;
+  headers?: Record<string, string>;
+  body: unknown;
+}>) {
+  const server = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    const rawBody = Buffer.concat(chunks).toString('utf8');
+    const result = await handler({
+      path: new URL(req.url ?? '/', 'http://127.0.0.1').pathname,
+      method: req.method ?? 'GET',
+      headers: new Headers(req.headers as Record<string, string>),
+      body: rawBody ? JSON.parse(rawBody) as Record<string, unknown> : {},
+    });
+    for (const [key, value] of Object.entries(result.headers ?? {})) {
+      res.setHeader(key, value);
+    }
+    res.setHeader('content-type', 'application/json');
+    res.statusCode = result.status ?? 200;
+    res.end(JSON.stringify(result.body));
+  });
+
+  server.listen(0);
+  serverRefs.push(server);
+  await new Promise<void>((resolve) => {
+    server.once('listening', () => resolve());
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('failed to acquire test upstream address');
+  }
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function startSseUpstream(handler: (input: {
+  path: string;
+  headers: Headers;
+  body: Record<string, unknown>;
+}) => string[]) {
+  const server = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    const rawBody = Buffer.concat(chunks).toString('utf8');
+    const events = handler({
+      path: new URL(req.url ?? '/', 'http://127.0.0.1').pathname,
+      headers: new Headers(req.headers as Record<string, string>),
+      body: rawBody ? JSON.parse(rawBody) as Record<string, unknown> : {},
+    });
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    });
+    for (const event of events) {
+      res.write(event);
+    }
+    res.end();
+  });
+
+  server.listen(0);
+  serverRefs.push(server);
+  await new Promise<void>((resolve) => {
+    server.once('listening', () => resolve());
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('failed to acquire test upstream address');
   }
   return `http://127.0.0.1:${address.port}`;
 }
@@ -180,6 +268,258 @@ describe('createApp wecom toggle', () => {
     expect(payload.channels?.feishu?.docBaseUrlConfigured).toBe(true);
     expect(payload.channels?.feishu?.startupHelpEnabled).toBe(true);
     expect(payload.channels?.feishu?.startupHelpAdminConfigured).toBe(true);
+  });
+});
+
+describe('createApp OpenAI compatibility routes', () => {
+  it('proxies Responses API requests to the configured upstream', async () => {
+    const upstreamCalls: Array<{
+      path: string;
+      authorization: string | null;
+      body: Record<string, unknown>;
+    }> = [];
+    const upstreamBaseUrl = await startJsonUpstream(async (input) => {
+      upstreamCalls.push({
+        path: input.path,
+        authorization: input.headers.get('authorization'),
+        body: input.body,
+      });
+      return {
+        body: {
+          id: 'resp_test',
+          object: 'response',
+          created_at: 1,
+          status: 'completed',
+          model: 'gpt-5',
+          output: [],
+        },
+      };
+    });
+    const baseUrl = await startTestServer({
+      openAiCompat: {
+        upstreamBaseUrl,
+        upstreamApiKey: 'upstream-secret',
+        clientApiKey: 'client-secret',
+      },
+    });
+
+    const response = await fetch(`${baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer client-secret',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-5',
+        input: 'hello',
+      }),
+    });
+    const payload = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(payload.id).toBe('resp_test');
+    expect(upstreamCalls).toEqual([
+      {
+        path: '/responses',
+        authorization: 'Bearer upstream-secret',
+        body: {
+          model: 'gpt-5',
+          input: 'hello',
+        },
+      },
+    ]);
+  });
+
+  it('proxies the model list endpoint for OpenAI-compatible clients', async () => {
+    const upstreamCalls: Array<{ method: string; path: string }> = [];
+    const upstreamBaseUrl = await startJsonUpstream(async (input) => {
+      upstreamCalls.push({
+        method: input.method,
+        path: input.path,
+      });
+      return {
+        body: {
+          object: 'list',
+          data: [
+            {
+              id: 'gpt-5',
+              object: 'model',
+            },
+          ],
+        },
+      };
+    });
+    const baseUrl = await startTestServer({
+      openAiCompat: {
+        upstreamBaseUrl,
+        upstreamApiKey: 'same-secret',
+      },
+    });
+
+    const response = await fetch(`${baseUrl}/v1/models`, {
+      headers: {
+        authorization: 'Bearer same-secret',
+      },
+    });
+    const payload = await response.json() as { data?: Array<{ id?: string }> };
+
+    expect(response.status).toBe(200);
+    expect(upstreamCalls).toEqual([{ method: 'GET', path: '/models' }]);
+    expect(payload.data?.[0]?.id).toBe('gpt-5');
+  });
+
+  it('converts Chat Completions requests to Responses API and maps the result back', async () => {
+    const upstreamCalls: Array<Record<string, unknown>> = [];
+    const upstreamBaseUrl = await startJsonUpstream(async (input) => {
+      upstreamCalls.push(input.body);
+      return {
+        body: {
+          id: 'resp_chat',
+          object: 'response',
+          created_at: 123,
+          status: 'completed',
+          model: 'gpt-5',
+          output: [
+            {
+              type: 'message',
+              role: 'assistant',
+              content: [
+                {
+                  type: 'output_text',
+                  text: '你好，我是兼容层。',
+                },
+              ],
+            },
+          ],
+          usage: {
+            input_tokens: 8,
+            output_tokens: 6,
+            total_tokens: 14,
+          },
+        },
+      };
+    });
+    const baseUrl = await startTestServer({
+      openAiCompat: {
+        upstreamBaseUrl,
+        upstreamApiKey: 'same-secret',
+      },
+    });
+
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer same-secret',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-5',
+        messages: [
+          { role: 'system', content: '你是助手' },
+          { role: 'user', content: '打个招呼' },
+        ],
+        temperature: 0.2,
+        max_tokens: 64,
+      }),
+    });
+    const payload = await response.json() as {
+      object?: string;
+      choices?: Array<{ message?: { content?: string } }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    };
+
+    expect(response.status).toBe(200);
+    expect(upstreamCalls[0]).toEqual({
+      model: 'gpt-5',
+      input: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'input_text',
+              text: '打个招呼',
+            },
+          ],
+        },
+      ],
+      instructions: '你是助手',
+      temperature: 0.2,
+      max_output_tokens: 64,
+    });
+    expect(payload.object).toBe('chat.completion');
+    expect(payload.choices?.[0]?.message?.content).toBe('你好，我是兼容层。');
+    expect(payload.usage).toEqual({
+      prompt_tokens: 8,
+      completion_tokens: 6,
+      total_tokens: 14,
+    });
+  });
+
+  it('rejects OpenAI-compatible requests with an invalid client key', async () => {
+    const upstreamBaseUrl = await startJsonUpstream(async () => ({
+      body: { id: 'should_not_be_called' },
+    }));
+    const baseUrl = await startTestServer({
+      openAiCompat: {
+        upstreamBaseUrl,
+        upstreamApiKey: 'upstream-secret',
+        clientApiKey: 'client-secret',
+      },
+    });
+
+    const response = await fetch(`${baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer wrong-secret',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-5',
+        input: 'hello',
+      }),
+    });
+    const payload = await response.json() as { error?: { type?: string } };
+
+    expect(response.status).toBe(401);
+    expect(payload.error?.type).toBe('invalid_api_key');
+  });
+
+  it('converts streaming Responses events into Chat Completions chunks', async () => {
+    const upstreamBaseUrl = await startSseUpstream(() => [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: '你' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: '好' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp_stream', created_at: 321, model: 'gpt-5' } })}\n\n`,
+      'data: [DONE]\n\n',
+    ]);
+    const baseUrl = await startTestServer({
+      openAiCompat: {
+        upstreamBaseUrl,
+        upstreamApiKey: 'same-secret',
+      },
+    });
+
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer same-secret',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-5',
+        stream: true,
+        messages: [
+          { role: 'user', content: '流式打招呼' },
+        ],
+      }),
+    });
+    const text = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/event-stream');
+    expect(text).toContain('"object":"chat.completion.chunk"');
+    expect(text).toContain('"content":"你"');
+    expect(text).toContain('"content":"好"');
+    expect(text).toContain('data: [DONE]');
   });
 });
 

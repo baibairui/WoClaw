@@ -16,7 +16,13 @@ interface AgentWorkspaceManagerLike {
 }
 
 interface CodexRunnerLike {
-  runForSystem(input: {
+  runForSystem?(input: {
+    prompt: string;
+    model?: string;
+    search?: boolean;
+    workdir?: string;
+  }): Promise<{ threadId: string; rawOutput: string }>;
+  run?(input: {
     prompt: string;
     model?: string;
     search?: boolean;
@@ -122,7 +128,12 @@ export class MemorySteward {
     });
 
     try {
-      await this.codexRunner.runForSystem({
+      const runForSystem = this.codexRunner.runForSystem?.bind(this.codexRunner)
+        ?? this.codexRunner.run?.bind(this.codexRunner);
+      if (!runForSystem) {
+        throw new TypeError('codexRunner requires runForSystem or run');
+      }
+      await runForSystem({
         prompt,
         model: this.model,
         search: false,

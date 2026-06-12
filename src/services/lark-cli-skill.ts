@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { upsertManagedSection } from './agents-managed-sections.js';
 
 export const LARK_CLI_SKILL_NAME = 'lark-cli';
 const FEISHU_RULE_START = '<!-- gateway:feishu-ops:start -->';
@@ -51,25 +52,4 @@ function ensureAgentsLarkRule(workspaceDir: string): void {
   if (next !== content) {
     fs.writeFileSync(agentsPath, `${next.trimEnd()}\n`, 'utf8');
   }
-}
-
-function upsertManagedSection(
-  content: string,
-  startMarker: string,
-  endMarker: string,
-  section: string,
-  legacyPatterns: RegExp[],
-): string {
-  let next = content;
-  for (const pattern of legacyPatterns) {
-    next = next.replace(pattern, '\n');
-  }
-  const start = next.indexOf(startMarker);
-  const end = next.indexOf(endMarker);
-  if (start >= 0 && end > start) {
-    const before = next.slice(0, start).trimEnd();
-    const after = next.slice(end + endMarker.length).trimStart();
-    return [before, section, after].filter(Boolean).join('\n\n');
-  }
-  return `${next.trimEnd()}\n\n${section}\n`;
 }

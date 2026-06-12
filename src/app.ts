@@ -6,6 +6,7 @@ import { createLogger } from './utils/logger.js';
 import { allowList } from './utils/allow-list.js';
 import { buildFeishuStatusSummary } from './utils/feishu-status.js';
 import { normalizeFeishuIncomingMessage, normalizeWeComIncomingMessage } from './utils/message-normalizer.js';
+import { createOpenAiCompatRouter, type OpenAiCompatLayerOptions } from './services/openai-compat-layer.js';
 
 const log = createLogger('App');
 interface AppDeps {
@@ -31,6 +32,7 @@ interface AppDeps {
       data?: Record<string, unknown>;
     }>;
   };
+  openAiCompat?: OpenAiCompatLayerOptions;
   isDuplicateMessage: (msgId?: string) => boolean;
   /**
    * 处理文本消息，业务回复统一走主动发消息 API，无需返回值。
@@ -406,6 +408,9 @@ export function createApp(deps: AppDeps) {
   }
   if (deps.browserAutomation || deps.internalApiToken) {
     app.use('/internal', express.json({ type: 'application/json', limit: '2mb' }));
+  }
+  if (deps.openAiCompat) {
+    app.use('/v1', createOpenAiCompatRouter(deps.openAiCompat));
   }
 
   // ============ 请求日志中间件 ============

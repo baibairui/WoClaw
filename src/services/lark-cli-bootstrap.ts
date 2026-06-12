@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { resolveManagedGlobalSkillRoots } from './managed-global-skill-roots.js';
+
 const REQUIRED_LARK_SKILLS = [
   'lark-shared',
   'lark-doc',
@@ -11,8 +13,7 @@ const REQUIRED_LARK_SKILLS = [
 ] as const;
 
 interface EnsureLarkCliReadyInput {
-  gatewayRootDir: string;
-  codexHomeDir: string;
+  cliHomeDirs: string[];
   log?: {
     info(message: string, meta?: Record<string, unknown>): void;
     warn(message: string, meta?: Record<string, unknown>): void;
@@ -30,13 +31,7 @@ export async function ensureLarkCliReady(input: EnsureLarkCliReadyInput): Promis
   ensureLarkCliBinary(input.log);
   ensureOfficialLarkSkillsInstalled(resolvedHostHome, input.log);
 
-  const runtimeHomeDir = path.join(path.resolve(input.gatewayRootDir), '.codex-runtime', 'home');
-  const targetRoots = [
-    path.join(path.resolve(input.codexHomeDir), '.codex', 'skills'),
-    path.join(path.resolve(input.codexHomeDir), '.agents', 'skills'),
-    path.join(runtimeHomeDir, '.codex', 'skills'),
-    path.join(runtimeHomeDir, '.agents', 'skills'),
-  ];
+  const targetRoots = resolveManagedGlobalSkillRoots(input.cliHomeDirs);
   syncOfficialLarkSkills(resolvedHostHome, targetRoots, input.log);
 }
 

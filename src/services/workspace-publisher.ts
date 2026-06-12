@@ -18,10 +18,6 @@ export class WorkspacePublisher {
     return this.runScript('publish:workspace');
   }
 
-  repairUsers(): Promise<{ output: string }> {
-    return this.runScript('repair:users');
-  }
-
   private runScript(scriptName: string): Promise<{ output: string }> {
     return new Promise((resolve, reject) => {
       const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';

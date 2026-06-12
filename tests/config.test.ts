@@ -38,7 +38,6 @@ const CONFIG_ENV_KEYS = [
   'GATEWAY_PUBLIC_BASE_URL',
   'CODEX_AGENTS_DIR',
   'CODEX_SANDBOX',
-  'CODEX_WORKDIR_ISOLATION',
   'BROWSER_AUTOMATION_ENABLED',
   'BROWSER_PROFILE_DIR',
   'BROWSER_MCP_ENABLED',
@@ -71,6 +70,9 @@ const CONFIG_ENV_KEYS = [
   'SPEECH_AUDIO_MAX_DURATION_SEC',
   'SPEECH_AUDIO_ALLOWED_MIME_TYPES',
   'SPEECH_PROMPT_INCLUDE_TRANSCRIPT_META',
+  'OPENAI_COMPAT_UPSTREAM_BASE_URL',
+  'OPENAI_COMPAT_UPSTREAM_API_KEY',
+  'OPENAI_COMPAT_API_KEY',
 ] as const;
 
 async function loadConfigWithEnv(env: Record<string, string | undefined>) {
@@ -193,27 +195,15 @@ describe('config cli provider', () => {
   });
 });
 
-describe('config workdir isolation', () => {
-  it('defaults to off', async () => {
+describe('config runtime isolation surface', () => {
+  it('does not expose a configurable workdir isolation field', async () => {
     const config = await loadConfigWithEnv({
       WECOM_ENABLED: 'false',
       FEISHU_ENABLED: 'false',
       CODEX_SANDBOX: 'none',
-      CODEX_WORKDIR_ISOLATION: undefined,
     });
 
-    expect(config.codexWorkdirIsolation).toBe('off');
-  });
-
-  it('reads bwrap isolation mode', async () => {
-    const config = await loadConfigWithEnv({
-      WECOM_ENABLED: 'false',
-      FEISHU_ENABLED: 'false',
-      CODEX_SANDBOX: 'none',
-      CODEX_WORKDIR_ISOLATION: 'bwrap',
-    });
-
-    expect(config.codexWorkdirIsolation).toBe('bwrap');
+    expect(Object.prototype.hasOwnProperty.call(config, 'codexWorkdirIsolation')).toBe(false);
   });
 });
 
@@ -389,6 +379,35 @@ describe('config speech defaults', () => {
       prompt: {
         includeTranscriptMeta: false,
       },
+    });
+  });
+});
+
+describe('config OpenAI compatibility layer', () => {
+  it('is disabled until an upstream URL and key are configured', async () => {
+    const config = await loadConfigWithEnv({
+      WECOM_ENABLED: 'false',
+      FEISHU_ENABLED: 'false',
+      CODEX_SANDBOX: 'full-auto',
+    });
+
+    expect(config.openAiCompat).toBeUndefined();
+  });
+
+  it('reads the OpenAI-compatible upstream and client key', async () => {
+    const config = await loadConfigWithEnv({
+      WECOM_ENABLED: 'false',
+      FEISHU_ENABLED: 'false',
+      CODEX_SANDBOX: 'full-auto',
+      OPENAI_COMPAT_UPSTREAM_BASE_URL: 'https://api.example.com/v1/',
+      OPENAI_COMPAT_UPSTREAM_API_KEY: 'upstream-secret',
+      OPENAI_COMPAT_API_KEY: 'client-secret',
+    });
+
+    expect(config.openAiCompat).toEqual({
+      upstreamBaseUrl: 'https://api.example.com/v1',
+      upstreamApiKey: 'upstream-secret',
+      clientApiKey: 'client-secret',
     });
   });
 });

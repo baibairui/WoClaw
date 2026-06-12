@@ -256,8 +256,10 @@ export class AgentWorkspaceManager {
   repairWorkspaceScaffold(workspaceDir: string): void {
     fs.mkdirSync(workspaceDir, { recursive: true });
     installManagedSkills(workspaceDir);
+    this.stripLegacyAgentsReferences(workspaceDir);
 
     if (workspaceDir === this.rootDir) {
+      this.ensureRootWorkspaceScaffold(workspaceDir);
       return;
     }
 
@@ -383,6 +385,24 @@ export class AgentWorkspaceManager {
     this.removeLegacyWorkspaceFiles(workspaceDir);
     installManagedSkills(workspaceDir);
     this.stripLegacyAgentsReferences(workspaceDir);
+  }
+
+  private ensureRootWorkspaceScaffold(workspaceDir: string): void {
+    this.writeIfMissing(
+      path.join(workspaceDir, 'README.md'),
+      renderRootWorkspaceReadme(),
+    );
+    this.writeSoulBootstrapIfMissingOrUninitialized(
+      path.join(workspaceDir, 'SOUL.md'),
+      renderRootWorkspaceSoul(),
+    );
+    this.writeWorkspaceManifest(workspaceDir, {
+      schemaVersion: 1,
+      kind: 'agent',
+      agentId: 'default',
+      agentName: '默认Agent',
+      template: 'default',
+    });
   }
 
   private resolveUserDirFromWorkspace(workspaceDir: string): string {
@@ -515,7 +535,11 @@ export class AgentWorkspaceManager {
     const content = fs.readFileSync(agentsPath, 'utf8');
     const next = content
       .replace(/^.*browser-playbook.*\n?/gim, '')
-      .replace(/^.*feishu-ops-playbook.*\n?/gim, '');
+      .replace(/^.*feishu-ops-playbook.*\n?/gim, '')
+      .replace(/^.*`\.\/TOOLS\.md`.*\n?/gim, '')
+      .replace(/^.*`\.\/memory\/identity\.md`.*\n?/gim, '')
+      .replace(/^.*`\.\/shared-memory\/identity\.md`.*\n?/gim, '')
+      .replace(/^.*shared-memory\/identity\.md.*\n?/gim, '');
     if (next !== content) {
       fs.writeFileSync(agentsPath, next.trimEnd() + '\n', 'utf8');
     }
@@ -632,6 +656,16 @@ function renderSystemMemoryStewardReadme(): string {
     '',
     '这个目录属于系统后台任务，不面向最终用户。',
     '定时任务会在这里运行 Codex，用于整理当前用户的 `user.md` 与 agent 的短期上下文。',
+    '',
+  ].join('\n');
+}
+
+function renderRootWorkspaceReadme(): string {
+  return [
+    '# 默认Agent',
+    '',
+    '这个目录是实例级共享默认 agent 的工作空间。',
+    '用于部署、实例编排、运行排障、配置审计与修复。',
     '',
   ].join('\n');
 }
@@ -766,6 +800,25 @@ function renderSystemMemoryStewardSoul(): string {
     '- Boundaries:',
     '  - 不作为通用对话助手',
     '- Success criteria: user.md 长期可读且不过度膨胀',
+    '',
+  ].join('\n');
+}
+
+function renderRootWorkspaceSoul(): string {
+  return [
+    '# SOUL',
+    '',
+    '- Agent name: 默认Agent',
+    '- Agent ID: default',
+    '- Role: 实例级默认运维助手',
+    '- Mission: 维护当前 gateway 实例的部署、配置、排障与修复流程',
+    '- Working style: 直接、可验证、优先收敛补丁债',
+    '- Decision principles:',
+    '  - 基于事实，不编造执行结果',
+    '  - 优先统一入口，不继续叠兼容分支',
+    '- Boundaries:',
+    '  - 不把租户级业务上下文固化为实例级规则',
+    '- Success criteria: 默认工作区长期稳定、提示词可维护、修复入口一致',
     '',
   ].join('\n');
 }

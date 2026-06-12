@@ -212,7 +212,7 @@ describe('createChatHandler', () => {
     };
     expect(getFeishuCardHeaderTitle(payload)).toBe('处理中');
     expect(parsed.content?.header?.template).toBe('turquoise');
-    expect(stopButton?.text?.content).toBe('结束');
+    expect(stopButton?.text?.content).toBe('停止本次任务');
     expect(stopButton?.type).toBe('danger');
     const serialized = JSON.stringify(elements);
     expect(serialized).toContain('**当前阶段**');
@@ -243,6 +243,25 @@ describe('createChatHandler', () => {
       };
     };
     expect(parsed.content?.config?.update_multi).toBe(true);
+  });
+
+  it('renders a completed feishu run card with useful next actions', () => {
+    const payload = buildFeishuRunCardMessage({
+      runId: 'run_1',
+      agentName: '默认助手',
+      provider: 'codex',
+      status: 'completed',
+      startedAt: Date.now() - 30_000,
+      lastActivityAt: Date.now(),
+      threadId: 'thread_1',
+    });
+    const elements = getFeishuCardElements(payload);
+    const buttons = extractFeishuButtons(elements);
+    const serialized = JSON.stringify(elements);
+
+    expect(serialized).toContain('已处理完成');
+    expect(buttons.some((button) => button.text?.content === '查看会话' && button.value?.gateway_cmd === '/session')).toBe(true);
+    expect(buttons.some((button) => button.text?.content === '查看目标' && button.value?.gateway_cmd === '/goal')).toBe(true);
   });
 
   it('keeps sessions isolated per real user id', async () => {
@@ -501,6 +520,128 @@ describe('createChatHandler', () => {
 
     expect(sendText).toHaveBeenCalledWith('wecom', 'u1', '❌ 这次处理没完成，请稍后重试。');
     expect(sessionStore.getSession('u1', 'default')).toBeUndefined();
+  });
+
+  it('renders actionable feishu recovery actions when codex run fails', async () => {
+    const sendText = vi.fn(async () => undefined);
+    const sessionStore = createSessionStore();
+    const handler = createChatHandler({
+      sessionStore,
+      rateLimitStore: { allow: () => true },
+      codexRunner: {
+        run: async () => {
+          throw new Error('boom');
+        },
+        review: async () => ({ rawOutput: '' }),
+      },
+      agentWorkspaceManager: {
+        createWorkspace: () => ({ agentId: 'a1', workspaceDir: '/tmp/a1' }),
+        isSharedMemoryEmpty: () => false,
+      },
+      runnerEnabled: true,
+      defaultModel: 'gpt-5-codex',
+      defaultSearch: false,
+      reminderDbPath: '/tmp/reminders.db',
+      sendText,
+    });
+
+    await handler({ channel: 'feishu', userId: 'u1', content: 'hello' });
+
+    const payload = String(sendText.mock.calls.at(-1)?.[2] ?? '');
+    const buttons = extractFeishuButtons(getFeishuCardElements(payload));
+
+    expect(payload).toContain('这次处理没完成');
+    expect(buttons.some((button) => button.text?.content === '查看帮助' && button.value?.gateway_cmd === '/help')).toBe(true);
+    expect(buttons.some((button) => button.text?.content === '登录授权' && button.value?.gateway_cmd === '/login')).toBe(true);
+    expect(buttons.some((button) => button.text?.content === '当前会话' && button.value?.gateway_cmd === '/session')).toBe(true);
+    expect(sessionStore.getSession('u1', 'default')).toBeUndefined();
+  });
+
+  it('passes current agent skill policy into codex runs', async () => {
+    const sendText = vi.fn(async () => undefined);
+    const sessionStore = createSessionStore();
+    const run = vi.fn(async () => ({ threadId: 'thread_policy', rawOutput: '' }));
+    const skillManager = {
+      listEffectiveSkills: vi.fn(() => []),
+      listGlobalSkills: vi.fn(() => []),
+      listAgentLocalSkills: vi.fn(() => []),
+      disableGlobalSkill: vi.fn(() => ({ ok: true })),
+      enableGlobalSkill: vi.fn(() => ({ ok: true })),
+      disableAgentSkill: vi.fn(() => ({ ok: true })),
+      getPolicy: vi.fn(() => ({
+        disabledGlobalSkills: ['using-superpowers'],
+        disabledAgentSkills: ['reminder-tool'],
+      })),
+    };
+    const handler = createChatHandler({
+      sessionStore,
+      rateLimitStore: { allow: () => true },
+      codexRunner: {
+        run,
+        review: async () => ({ rawOutput: '' }),
+      },
+      agentWorkspaceManager: {
+        createWorkspace: () => ({ agentId: 'a1', workspaceDir: '/tmp/a1' }),
+        isSharedMemoryEmpty: () => false,
+      },
+      runnerEnabled: true,
+      defaultModel: 'gpt-5-codex',
+      defaultSearch: false,
+      reminderDbPath: '/tmp/reminders.db',
+      sendText,
+      skillManager,
+    });
+
+    await handler({ channel: 'wecom', userId: 'u1', content: 'hello' });
+
+    expect(skillManager.getPolicy).toHaveBeenCalledWith('/repo/default');
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({
+      skillPolicy: {
+        disabledGlobalSkills: ['using-superpowers'],
+        disabledAgentSkills: ['reminder-tool'],
+      },
+    }));
+  });
+
+  it('passes /goal to Codex as a native slash command and persists the resulting thread', async () => {
+    const sendText = vi.fn(async () => undefined);
+    const sessionStore = createSessionStore();
+    const run = vi.fn(async (input: { prompt: string; onMessage?: (text: string) => void }) => {
+      input.onMessage?.('✅ 已更新 Codex 目标：improve benchmark coverage');
+      return {
+        threadId: 'thread_goal',
+        rawOutput: '',
+      };
+    });
+    const handler = createChatHandler({
+      sessionStore,
+      rateLimitStore: { allow: () => true },
+      codexRunner: {
+        run,
+        review: async () => ({ rawOutput: '' }),
+      },
+      agentWorkspaceManager: {
+        createWorkspace: () => ({ agentId: 'a1', workspaceDir: '/tmp/a1' }),
+        isSharedMemoryEmpty: () => false,
+      },
+      runnerEnabled: true,
+      defaultModel: 'gpt-5-codex',
+      defaultSearch: false,
+      reminderDbPath: '/tmp/reminders.db',
+      sendText,
+    });
+
+    await handler({ channel: 'wecom', userId: 'u1', content: '/goal improve benchmark coverage' });
+
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: '/goal improve benchmark coverage',
+      threadId: undefined,
+      model: 'gpt-5-codex',
+      workdir: '/repo/default',
+    }));
+    expect(sessionStore.getSession('u1', 'default')).toBe('thread_goal');
+    expect(sendText).toHaveBeenCalledWith('wecom', 'u1', expect.stringContaining('已更新 Codex 目标'));
+    expect(sendText).toHaveBeenCalledWith('wecom', 'u1', expect.stringContaining('improve benchmark coverage'));
   });
 
   it('does not expose raw timeout errors after partial agent output', async () => {
@@ -1644,7 +1785,7 @@ local_audio_path=${sourcePath}`,
   it('patches the same feishu run card to stopped after stop', async () => {
     const sendText = vi.fn(async () => undefined);
     const sendTextWithResult = vi.fn(async (_channel: 'wecom' | 'feishu' | 'weixin', _userId: string, content: string) => {
-      if (content.includes('结束')) {
+      if (content.includes('停止本次任务')) {
         return 'om_run_1';
       }
       return undefined;
@@ -1938,8 +2079,8 @@ local_audio_path=${sourcePath}`,
 
     expect(sendText).toHaveBeenNthCalledWith(1, 'wecom', 'u1', expect.stringContaining('当前 agent 尚未显式选择模型通道'));
     expect(sendText).toHaveBeenNthCalledWith(2, 'wecom', 'u1', expect.stringContaining('可用命令（按功能分组，帮助页 1/3）：'));
-    expect(sendText).toHaveBeenNthCalledWith(3, 'wecom', 'u1', '默认助手 ·\n开始处理。');
-    expect(sendText).toHaveBeenNthCalledWith(4, 'wecom', 'u1', '默认助手 ·\n⏳ 已接收请求，正在处理...');
+    expect(sendText).toHaveBeenNthCalledWith(3, 'wecom', 'u1', '默认助手 ·\n⏳ 已接收请求，正在处理...');
+    expect(sendText).toHaveBeenNthCalledWith(4, 'wecom', 'u1', '默认助手 ·\n开始处理。');
   });
 
   it('keeps running when the progress status push fails', async () => {
@@ -1977,7 +2118,8 @@ local_audio_path=${sourcePath}`,
 
     await handler({ channel: 'wecom', userId: 'u1', content: 'hello' });
 
-    expect(sendText).toHaveBeenNthCalledWith(1, 'wecom', 'u1', '默认助手 ·\n第一条回复');
+    expect(sendText).toHaveBeenNthCalledWith(1, 'wecom', 'u1', '默认助手 ·\n⏳ 已接收请求，正在处理...');
+    expect(sendText).toHaveBeenNthCalledWith(2, 'wecom', 'u1', '默认助手 ·\n第一条回复');
   });
 
   it('drops an invalid persisted thread id and starts a fresh session instead of failing', async () => {
@@ -2269,6 +2411,43 @@ local_audio_path=${sourcePath}`,
     expect(labels).toContain('API URL / Key 登录');
     expect(buttons.some((button) => button.value?.gateway_action === 'codex_login.start_device_auth')).toBe(true);
     expect(buttons.some((button) => button.value?.gateway_action === 'codex_login.open_api_form')).toBe(true);
+  });
+
+  it('includes current cli auth state in the feishu /login card', async () => {
+    const codexHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-login-state-'));
+    fs.writeFileSync(path.join(codexHomeDir, 'config.toml'), 'model = "gpt-5.4"\n', 'utf8');
+    fs.writeFileSync(path.join(codexHomeDir, 'auth.json'), '{"OPENAI_API_KEY":"sk-test"}\n', 'utf8');
+    const sendText = vi.fn(async () => undefined);
+    const sessionStore = createSessionStore();
+    const handler = createChatHandler({
+      sessionStore,
+      rateLimitStore: { allow: () => true },
+      codexRunner: {
+        run: async () => ({ threadId: 'thread_new', rawOutput: '' }),
+        review: async () => ({ rawOutput: '' }),
+        login: async () => undefined,
+      },
+      codexHomeDir,
+      agentWorkspaceManager: {
+        createWorkspace: () => ({ agentId: 'a1', workspaceDir: '/tmp/a1' }),
+        isSharedMemoryEmpty: () => false,
+      },
+      runnerEnabled: true,
+      defaultModel: 'gpt-5-codex',
+      defaultSearch: false,
+      reminderDbPath: '/tmp/reminders.db',
+      sendText,
+    });
+
+    await handler({ channel: 'feishu', userId: 'u1', content: '/login' });
+
+    const payload = String(sendText.mock.calls[0]?.[2] ?? '');
+    const serialized = JSON.stringify(getFeishuCardElements(payload));
+    expect(serialized).toContain('配置状态');
+    expect(serialized).toContain('已写入');
+    expect(serialized).toContain('授权状态');
+    expect(serialized).toContain('已发现');
+    expect(serialized).toContain('gpt-5.4');
   });
 
   it('treats /feishu-auth as an unknown command in feishu channel', async () => {
@@ -2684,6 +2863,7 @@ local_audio_path=${sourcePath}`,
         .map((item) => String((item as { content?: unknown }).content ?? ''));
       expect(markdownContents.join('\n')).toContain('**当前重点**');
       expect(markdownContents.join('\n')).toContain('**当前状态**');
+      expect(markdownContents.join('\n')).toContain('✅ 已切换模型为：gpt-5');
       expect(markdownContents.join('\n')).toContain('**可选模型**');
       const currentModelAction = extractFeishuButtons(elements)
         .find((action) => action.value?.gateway_cmd === '/model');
@@ -3618,12 +3798,15 @@ local_audio_path=${sourcePath}`,
     expect(sanitized).not.toContain('agent.md');
   });
 
-  it('streams feishu snapshots through the dedicated sender and skips a duplicate final flush', async () => {
+  it('streams feishu agent messages as separate card snapshots and skips a duplicate final flush', async () => {
     const sendText = vi.fn(async () => undefined);
     const sendStreamingText = vi.fn(async () => undefined);
     const sessionStore = createSessionStore();
-    const nowValues = [100, 1000, 2000, 3000];
-    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => nowValues.shift() ?? 4000);
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
+      now += 1000;
+      return now;
+    });
 
     const handler = createChatHandler({
       sessionStore,
@@ -3661,7 +3844,7 @@ local_audio_path=${sourcePath}`,
     expect(sendStreamingText.mock.calls[0]?.[3]).toBe('默认助手 ·\n第一段');
     expect(sendStreamingText.mock.calls[0]?.[4]).toBe(false);
     expect(sendStreamingText.mock.calls[1]?.[3]).toBe('默认助手 ·\n第二段');
-    expect(sendStreamingText.mock.calls[1]?.[4]).toBe(true);
+    expect(sendStreamingText.mock.calls[1]?.[4]).toBe(false);
     expect(sendText).not.toHaveBeenCalledWith('feishu', 'u1', '默认助手 ·\n第一段');
     expect(sendText).not.toHaveBeenCalledWith('feishu', 'u1', '默认助手 ·\n第二段');
   });

@@ -246,7 +246,6 @@ FEISHU_GROUP_REQUIRE_MENTION=true
 CODEX_BIN=codex
 CODEX_WORKDIR=/absolute/path/to/agent-root
 CODEX_SANDBOX=full-auto
-CODEX_WORKDIR_ISOLATION=off
 RUNNER_ENABLED=true
 CODEX_SEARCH=false
 ```
@@ -255,7 +254,25 @@ CODEX_SEARCH=false
 
 - `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 是最小阻塞项
 - 长连接模式不需要公网 webhook 回调地址
+- agent 运行默认永久使用隔离的 `bwrap` 工作区，不再提供 `CODEX_WORKDIR_ISOLATION` 切换
 - 但仍然需要你先在飞书开放平台完成应用创建、Bot 配置、事件订阅和权限设置
+
+### OpenAI 兼容网关
+
+如果希望旧客户端继续只配置 `base_url + api_key`，可以启用兼容层：
+
+```env
+OPENAI_COMPAT_UPSTREAM_BASE_URL=https://api.openai.com/v1
+OPENAI_COMPAT_UPSTREAM_API_KEY=sk-upstream
+OPENAI_COMPAT_API_KEY=sk-gateway-client
+```
+
+客户端侧填写：
+
+- `base_url=http://你的网关地址:3000/v1`
+- `api_key=OPENAI_COMPAT_API_KEY`
+
+兼容层会原样代理 `POST /v1/responses`，把旧的 `POST /v1/chat/completions` 转成 Responses API 后再映射回 Chat Completions 格式，并代理 `GET /v1/models`。
 
 ### 企业微信
 
