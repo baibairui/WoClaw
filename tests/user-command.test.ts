@@ -179,10 +179,6 @@ describe('handleUserCommand', () => {
     expect(create.createAgentName).toBe('测试工作流');
     expect(create.createAgentTemplate).toBe('default');
 
-    const init = handleUserCommand('/agent init-memory', context);
-    expect(init.handled).toBe(true);
-    expect(init.initMemoryAgent).toBe(true);
-
     const initSkill = handleUserCommand('/skill-agent', context);
     expect(initSkill.handled).toBe(true);
     expect(initSkill.initSkillAgent).toBe(true);

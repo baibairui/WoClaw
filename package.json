@@ -1,7 +1,7 @@
 {
   "name": "agentclaw",
   "version": "0.1.0",
-  "description": "Self-hosted multi-agent gateway that brings Codex CLI into Feishu, WeCom, and WeChat with persistent workspaces, memory, and local skills.",
+  "description": "Self-hosted multi-agent gateway that brings Codex CLI into Feishu, WeCom, and WeChat with persistent workspaces and local skills.",
   "main": "dist/server.js",
   "scripts": {
     "test": "LOG_LEVEL=error vitest run",
@@ -26,7 +26,6 @@
     "wechat",
     "self-hosted",
     "automation",
-    "memory",
     "gateway"
   ],
   "author": "bairui",

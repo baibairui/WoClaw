@@ -20,7 +20,6 @@ import {
   buildFeishuOpenCodeInputFallbackMessage,
   buildFeishuOpenCodeOauthMessage,
 } from './services/feishu-command-cards.js';
-import { MemorySteward } from './services/memory-steward.js';
 import { SessionSummarySteward } from './services/session-summary-steward.js';
 import { ReminderStore } from './services/reminder-store.js';
 import { ReminderDispatcher } from './services/reminder-dispatcher.js';
@@ -92,8 +91,6 @@ log.info('服务启动初始化...', {
   browserProfileDir: config.browserProfileDir ?? '(default)',
   codexHomeDir: config.codexProvider === 'opencode' ? opencodeHomeDir : codexHomeDir,
   runnerEnabled: config.runnerEnabled,
-  memoryStewardEnabled: config.memoryStewardEnabled,
-  memoryStewardIntervalHours: config.memoryStewardIntervalHours,
   sessionSummaryStewardEnabled: config.sessionSummaryStewardEnabled,
   sessionSummaryStewardIntervalMinutes: config.sessionSummaryStewardIntervalMinutes,
   allowFrom: config.allowFrom,
@@ -735,15 +732,6 @@ const reminderDispatcher = new ReminderDispatcher({
   },
 });
 
-const memorySteward = new MemorySteward({
-  sessionStore,
-  agentWorkspaceManager,
-  codexRunner,
-  enabled: config.memoryStewardEnabled,
-  intervalMs: config.memoryStewardIntervalHours * 60 * 60_000,
-  model: config.codexModel,
-});
-
 const sessionSummarySteward = new SessionSummarySteward({
   sessionStore,
   codexRunner,
@@ -1065,7 +1053,6 @@ app.listen(config.port, () => {
       });
     });
   }
-  memorySteward.start();
   sessionSummarySteward.start();
   reminderDispatcher.start();
   if (weixinApi) {

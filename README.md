@@ -5,7 +5,7 @@
 [![CI](https://github.com/baibairui/AgentClaw/actions/workflows/ci.yml/badge.svg)](https://github.com/baibairui/AgentClaw/actions/workflows/ci.yml)
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](./LICENSE)
 
-把 Codex CLI 接到飞书、企业微信或个人微信，让 AI 不再只是一次性聊天窗口，而是一个长期在线、带记忆、带工作区、能执行真实动作的多 Agent 系统。
+把 Codex CLI 接到飞书、企业微信或个人微信，让 AI 不再只是一次性聊天窗口，而是一个长期在线、带工作区、能执行真实动作的多 Agent 系统。
 
 AgentClaw 不是一个只会回消息的 bot 壳子，而是一个消息入口 + 本地 CLI 执行系统。消息从飞书、企业微信或微信进来后，会被路由到具体 Agent 的独立工作区，再由本地 Codex CLI、Skills、浏览器能力、提醒能力和平台 API 能力继续执行，最后把结果回传到聊天渠道。
 
@@ -14,15 +14,14 @@ AgentClaw 不是一个只会回消息的 bot 壳子，而是一个消息入口 +
 如果你只想快速理解这个项目，记住三件事：
 
 - 它把 Codex CLI 从终端里的个人工具，变成团队里长期在线的 Agent 系统
-- 它让每个 Agent 都有独立工作区、长期身份、短期记忆和执行边界
+- 它让每个 Agent 都有独立工作区和执行边界
 - 它不只会回复文本，还能进入真实目录执行任务，调用工具链，持续接着做事
 
 ## AgentClaw 和普通聊天机器人有什么不同
 
 | 能力 | AgentClaw | 普通聊天机器人 |
 | --- | --- | --- |
-| 每个 Agent 独立工作区 | 有 | 通常没有 |
-| 每个 Agent 独立长期身份与记忆 | 有 | 常常共用上下文 |
+| 每个 Agent 独立工作区与执行边界 | 有 | 常常共用上下文 |
 | 在真实项目目录里运行 Codex CLI | 有 | 少见 |
 | 本地 Skill / 工具系统 | 有 | 常常只有文本回复 |
 | 浏览器 / 桌面真实操作能力 | 可接入 | 通常没有 |
@@ -36,7 +35,6 @@ flowchart LR
     A[飞书 / 企业微信 / 微信] --> B[AgentClaw]
     B --> C[用户 / 会话 / Agent 路由]
     C --> D[Agent 独立工作区]
-    C --> E[长期身份与短期记忆]
     C --> F[Codex CLI / OpenCode]
     F --> G[本地 Skills]
     F --> H[浏览器 / 桌面能力]
@@ -48,16 +46,13 @@ flowchart LR
 
 ## 工作区模型
 
-每个 Agent 都有自己的工作目录、规则、身份和短期记忆。不同角色互不污染，这是 AgentClaw 能长期稳定工作的核心。
+每个 Agent 都有自己的工作目录、规则和执行边界。不同角色互不污染，这是 AgentClaw 能长期稳定工作的核心。
 
 ```mermaid
 flowchart TD
-    A[user.md<br/>用户长期身份] --> B[SOUL.md<br/>Agent 长期身份]
-    B --> C[memory/daily/<date>.md<br/>短期记忆]
-    B --> D[AGENTS.md<br/>工作规则]
-    B --> E[.codex/workspace.json<br/>工作区元数据]
-    D --> F[Skills]
-    E --> G[真实项目目录执行]
+    A[AGENTS.md<br/>工作规则] --> B[Skills]
+    A --> C[.codex/workspace.json<br/>工作区元数据]
+    C --> D[真实项目目录执行]
 ```
 
 典型目录结构：
@@ -65,20 +60,16 @@ flowchart TD
 ```text
 .data/
   users/<user>/
-    user.md
     agents/<agent>/
       AGENTS.md
       README.md
-      SOUL.md
-      memory/daily/
       .codex/workspace.json
 ```
 
 这套结构把：
 
-- 用户长期身份放在 `user.md`
-- Agent 长期身份放在 `SOUL.md`
-- 短期上下文放在 `memory/daily/`
+- Agent 的工作规则放在 `AGENTS.md`
+- 工作区元数据放在 `.codex/workspace.json`
 - 执行边界落在具体 Agent 工作区
 
 ## 你可以拿它做什么
@@ -100,7 +91,7 @@ flowchart TD
 ## 核心能力
 
 - 多 Agent 路由与会话持久化
-- 独立工作区、长期身份、短期记忆
+- 独立工作区与执行边界
 - 本地 Skill 体系
 - 浏览器能力链路
 - 桌面 GUI 能力链路
@@ -414,7 +405,6 @@ npm run publish:workspace
 
 - `CODEX_WORKDIR` 指向 Agent 工作区根目录
 - 每个 Agent 在独立工作区中运行
-- 长期身份和短期记忆不应混放
 - 浏览器、桌面、提醒、飞书 API 等能力通过 Skill 接入
 - 开发模式跑的是最新源码
 - 生产模式跑的是 `dist/` 产物

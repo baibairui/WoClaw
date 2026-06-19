@@ -68,7 +68,6 @@ describe('workspace-repair helpers', () => {
         syncManagedGlobalDesktopSkills: (input?: { roots?: string[] }) => void;
         workspaceManager: {
           repairWorkspaceScaffold: (workspaceDir: string) => void;
-          repairUserSharedMemoryTree: (userDir: string) => void;
         };
         syncSessionWorkspaceDirs: (dbPath: string) => { synced: number; moved: number; conflicts: number };
       }) => {
@@ -111,9 +110,6 @@ describe('workspace-repair helpers', () => {
         repairWorkspaceScaffold: (workspaceDir: string) => {
           calls.push(`repairWorkspaceScaffold:${path.resolve(workspaceDir)}`);
         },
-        repairUserSharedMemoryTree: (repairUserDir: string) => {
-          calls.push(`repairUserSharedMemoryTree:${path.resolve(repairUserDir)}`);
-        },
       },
       syncSessionWorkspaceDirs: (dbPath: string) => {
         calls.push(`syncSessionWorkspaceDirs:${path.resolve(dbPath)}`);
@@ -125,7 +121,6 @@ describe('workspace-repair helpers', () => {
       `syncManagedGlobalSkills:${JSON.stringify(managedGlobalSkillRoots)}`,
       `syncManagedGlobalDesktopSkills:${JSON.stringify(managedGlobalSkillRoots)}`,
       `repairWorkspaceScaffold:${path.resolve(agentsDir)}`,
-      `repairUserSharedMemoryTree:${path.resolve(userDir)}`,
       `repairWorkspaceScaffold:${path.resolve(agentWorkspaceDir)}`,
       `repairWorkspaceScaffold:${path.resolve(internalWorkspaceDir)}`,
       `syncSessionWorkspaceDirs:${path.resolve(rootDir, 'sessions.db')}`,
