@@ -50,7 +50,20 @@ export class ActiveRunManager {
       status: 'stopping',
       lastActivityAt: Date.now(),
     });
-    await run.stop('user_stop');
+    try {
+      await run.stop('user_stop');
+    } catch (error) {
+      // The run may have been removed while stopping; only mark stop_failed if it still exists.
+      const stillPresent = this.runs.get(input.runId);
+      if (stillPresent) {
+        this.runs.set(input.runId, {
+          ...stillPresent,
+          status: 'stop_failed',
+          lastActivityAt: Date.now(),
+        });
+      }
+      throw error;
+    }
     const refreshed = this.runs.get(input.runId);
     if (refreshed) {
       this.runs.set(input.runId, {

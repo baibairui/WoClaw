@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
@@ -272,6 +272,10 @@ message_id=om_1
 });
 
 describe('CodexRunner active control', () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+  });
+
   it('starts app-server with the goals feature and without the removed session-source flag', () => {
     const child = createMockChildProcess();
     vi.mocked(spawn).mockReturnValue(child as never);

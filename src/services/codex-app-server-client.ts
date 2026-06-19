@@ -247,7 +247,13 @@ export class CodexAppServerClient {
       return;
     }
 
-    this.onNotification?.(message);
+    try {
+      this.onNotification?.(message);
+    } catch (error) {
+      log.error('app-server onNotification 回调抛出异常', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private async handleServerRequest(request: CodexServerRequest): Promise<void> {
