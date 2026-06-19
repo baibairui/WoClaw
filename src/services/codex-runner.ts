@@ -451,6 +451,7 @@ export class CodexRunner {
       let stopRequested = false;
 
       let timer: NodeJS.Timeout | undefined;
+      let killTimer: NodeJS.Timeout | undefined;
       const refreshIdleTimeout = () => {
         if (settled) {
           return;
@@ -482,11 +483,12 @@ export class CodexRunner {
         }
         stopRequested = true;
         child.kill('SIGTERM');
-        setTimeout(() => {
+        killTimer = setTimeout(() => {
           if (!settled) {
             child.kill('SIGKILL');
           }
         }, 1_000);
+        killTimer.unref?.();
         return true;
       };
 
@@ -531,6 +533,9 @@ export class CodexRunner {
         if (timer) {
           clearTimeout(timer);
         }
+        if (killTimer) {
+          clearTimeout(killTimer);
+        }
         log.error('Codex 子进程 error 事件', error);
         reject(error);
       });
@@ -542,6 +547,9 @@ export class CodexRunner {
         settled = true;
         if (timer) {
           clearTimeout(timer);
+        }
+        if (killTimer) {
+          clearTimeout(killTimer);
         }
 
         log.info('Codex 子进程退出', {

@@ -7,7 +7,6 @@ import { syncManagedGlobalDesktopSkills } from './gateway-desktop-skill.js';
 
 interface WorkspaceRepairManagerLike {
   repairWorkspaceScaffold(workspaceDir: string): void;
-  repairUserSharedMemoryTree(userDir: string): void;
 }
 
 export interface StartupWorkspaceRepairStats {
@@ -100,7 +99,6 @@ export function runStartupWorkspaceRepair(input: {
       }
 
       users += 1;
-      input.workspaceManager.repairUserSharedMemoryTree(userDir);
 
       for (const workspaceDir of listRepairableWorkspaceDirs(userDir)) {
         input.workspaceManager.repairWorkspaceScaffold(workspaceDir);

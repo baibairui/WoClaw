@@ -5,6 +5,9 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('SessionStore');
 const DEFAULT_AGENT_ID = 'default';
+// The memory subsystem (and its onboarding agent) has been removed. These entries
+// stay only to keep any legacy `memory-onboarding` agents left in existing databases
+// hidden from agent listings; no new such agents are ever created.
 const HIDDEN_AGENT_ID_PREFIXES = ['memory-onboarding'];
 const HIDDEN_AGENT_NAMES = new Set(['记忆初始化引导']);
 

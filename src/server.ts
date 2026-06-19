@@ -20,7 +20,6 @@ import {
   buildFeishuOpenCodeInputFallbackMessage,
   buildFeishuOpenCodeOauthMessage,
 } from './services/feishu-command-cards.js';
-import { MemorySteward } from './services/memory-steward.js';
 import { SessionSummarySteward } from './services/session-summary-steward.js';
 import { ReminderStore } from './services/reminder-store.js';
 import { ReminderDispatcher } from './services/reminder-dispatcher.js';
@@ -92,8 +91,6 @@ log.info('服务启动初始化...', {
   browserProfileDir: config.browserProfileDir ?? '(default)',
   codexHomeDir: config.codexProvider === 'opencode' ? opencodeHomeDir : codexHomeDir,
   runnerEnabled: config.runnerEnabled,
-  memoryStewardEnabled: config.memoryStewardEnabled,
-  memoryStewardIntervalHours: config.memoryStewardIntervalHours,
   sessionSummaryStewardEnabled: config.sessionSummaryStewardEnabled,
   sessionSummaryStewardIntervalMinutes: config.sessionSummaryStewardIntervalMinutes,
   allowFrom: config.allowFrom,
@@ -735,15 +732,6 @@ const reminderDispatcher = new ReminderDispatcher({
   },
 });
 
-const memorySteward = new MemorySteward({
-  sessionStore,
-  agentWorkspaceManager,
-  codexRunner,
-  enabled: config.memoryStewardEnabled,
-  intervalMs: config.memoryStewardIntervalHours * 60 * 60_000,
-  model: config.codexModel,
-});
-
 const sessionSummarySteward = new SessionSummarySteward({
   sessionStore,
   codexRunner,
@@ -931,10 +919,22 @@ function saveWeixinCursor(filePath: string, cursor: string): void {
   fs.writeFileSync(filePath, JSON.stringify({ cursor }, null, 2), 'utf-8');
 }
 
+let weixinPollerTimer: NodeJS.Timeout | undefined;
+let weixinPollerStopped = false;
+
+function stopWeixinPoller(): void {
+  weixinPollerStopped = true;
+  if (weixinPollerTimer) {
+    clearTimeout(weixinPollerTimer);
+    weixinPollerTimer = undefined;
+  }
+}
+
 function startWeixinPoller(): void {
   if (!weixinApi) {
     return;
   }
+  weixinPollerStopped = false;
   const poll = async () => {
     try {
       const result = await weixinApi.getUpdates(weixinCursor);
@@ -965,7 +965,10 @@ function startWeixinPoller(): void {
         error: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      setTimeout(poll, config.weixinPollIntervalMs);
+      if (!weixinPollerStopped) {
+        weixinPollerTimer = setTimeout(poll, config.weixinPollIntervalMs);
+        weixinPollerTimer.unref?.();
+      }
     }
   };
   void poll();
@@ -1050,13 +1053,31 @@ app.listen(config.port, () => {
       });
     });
   }
-  memorySteward.start();
   sessionSummarySteward.start();
   reminderDispatcher.start();
   if (weixinApi) {
     startWeixinPoller();
   }
 });
+
+let shuttingDown = false;
+function gracefulShutdown(signal: string): void {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  log.info('收到退出信号，正在停止后台任务', { signal });
+  stopWeixinPoller();
+  sessionSummarySteward.stop();
+  reminderDispatcher.stop();
+}
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    gracefulShutdown(signal);
+    process.exit(0);
+  });
+}
 
 async function appDepsHandleText(input: {
   channel: 'wecom' | 'feishu' | 'weixin';

@@ -11,3 +11,7 @@ deploy*.sh
 bin/publish-workspace.sh
 
 .worktrees/
+
+# Generated CLI runtime home artifacts (created on build/test runs)
+.codex-runtime/home/.config/
+.codex-runtime/home/.gitconfig

@@ -5,14 +5,14 @@
 [![CI](https://github.com/baibairui/AgentClaw/actions/workflows/ci.yml/badge.svg)](https://github.com/baibairui/AgentClaw/actions/workflows/ci.yml)
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](./LICENSE)
 
-Bring Codex CLI into Feishu, WeCom, or personal WeChat as a long-running multi-agent teammate with persistent workspaces, memory, tools, and execution.
+Bring Codex CLI into Feishu, WeCom, or personal WeChat as a long-running multi-agent teammate with persistent workspaces, tools, and execution.
 
-AgentClaw is for teams that want more than a chat bot. Each agent gets its own working directory, long-term identity, short-term memory, local skills, browser automation, and operational channel entry points.
+AgentClaw is for teams that want more than a chat bot. Each agent gets its own working directory, local skills, browser automation, and operational channel entry points.
 
 ## Why People Star It
 
 - It turns Codex CLI from a solo terminal tool into a team-facing persistent agent system.
-- It gives every agent an isolated workspace and memory boundary, so tasks do not contaminate each other.
+- It gives every agent an isolated workspace and execution boundary, so tasks do not contaminate each other.
 - It supports real execution, not just answers: browser actions, reminders, Feishu API operations, document workflows, and custom local skills.
 - It is self-hosted, so credentials, context, workspaces, and automation stay under your control.
 
@@ -21,7 +21,7 @@ AgentClaw is for teams that want more than a chat bot. Each agent gets its own w
 | Capability | AgentClaw | Typical Chat Bot |
 | --- | --- | --- |
 | Long-lived agent workspaces | Yes | Usually no |
-| Separate memory per agent | Yes | Usually shared or ephemeral |
+| Separate workspace and execution boundary per agent | Yes | Usually shared or ephemeral |
 | Codex CLI execution in real project directories | Yes | Rare |
 | Local skill system | Yes | Rare |
 | Feishu / WeCom / WeChat entry points | Yes | Often single-channel |
@@ -32,7 +32,7 @@ AgentClaw is for teams that want more than a chat bot. Each agent gets its own w
 - Run a coding agent from Feishu or WeCom and keep context across many sessions.
 - Give different responsibilities to different agents: engineer, reviewer, researcher, doc writer, ops assistant.
 - Let an agent open a browser, inspect pages, write files, update docs, and report back in chat.
-- Keep memory and execution inside your own infrastructure instead of outsourcing the workflow to a hosted bot.
+- Keep context and execution inside your own infrastructure instead of outsourcing the workflow to a hosted bot.
 - Wrap internal automation as local skills and let agents invoke it directly.
 
 ## How It Works
@@ -44,7 +44,7 @@ Feishu / WeCom / WeChat
       AgentClaw
         |
         +--> user / session / agent routing
-        +--> agent-specific workspace and memory
+        +--> agent-specific workspace
         +--> Codex CLI / OpenCode runner
         +--> local skills / browser / reminders / platform APIs
         |
@@ -175,27 +175,23 @@ curl http://127.0.0.1:3000/healthz
 
 ## Why The Workspace Model Matters
 
-Each agent gets its own workspace, identity, and short-term memory. That is the main reason the system remains stable over time.
+Each agent gets its own workspace and execution boundary. That is the main reason the system remains stable over time.
 
 Typical layout:
 
 ```text
 .data/
   users/<user>/
-    user.md
     agents/<agent>/
       AGENTS.md
       README.md
-      SOUL.md
-      memory/daily/
       .codex/workspace.json
 ```
 
 This keeps:
 
-- long-term user identity in `user.md`
-- long-term agent identity in `SOUL.md`
-- short-lived context in `memory/daily/`
+- agent working rules in `AGENTS.md`
+- workspace metadata in `.codex/workspace.json`
 - execution constrained to a concrete agent workspace
 
 ## Built-In Capability Areas

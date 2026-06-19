@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import { commandNeedsAgentList, commandNeedsDetailedSessions, handleUserCommand, maskThreadId } from '../features/user-command.js';
 import path from 'node:path';
 import type { AgentListItem, AgentRecord, SessionListItem } from '../stores/session-store.js';
-import type { MemorySummarySnapshot } from './agent-workspace-manager.js';
 import { parseCodexJsonl } from './codex-runner.js';
 import { formatPaginatedCodexModelsText, loadCodexModels, resolveModelFromSnapshot } from './codex-models.js';
 import { AgentSkillManager } from './agent-skill-manager.js';
@@ -154,25 +153,10 @@ interface AgentWorkspaceManagerLike {
     userId: string;
     agentName: string;
     existingAgentIds: string[];
-    template?: 'default' | 'memory-onboarding' | 'skill-onboarding';
+    template?: 'default' | 'skill-onboarding';
   }): { agentId: string; workspaceDir: string };
   ensureDefaultWorkspace?(userId: string): { agentId: string; workspaceDir: string };
   repairWorkspaceScaffold?(workspaceDir: string): void;
-  isSharedMemoryEmpty(userId: string): boolean;
-  isWorkspaceIdentityEmpty?(workspaceDir: string): boolean;
-  getSharedMemorySnapshot?: (userId: string) => {
-    sharedMemoryDir: string;
-    identityContent: string;
-    identityVersion: string;
-    hasIdentity: boolean;
-  };
-  getIdentitySnapshot?: (userId: string, workspaceDir: string) => {
-    sharedMemoryDir: string;
-    identityContent: string;
-    identityVersion: string;
-    hasIdentity: boolean;
-  };
-  getMemorySummary?: (userId: string, workspaceDir: string) => MemorySummarySnapshot;
 }
 
 interface ChatHandlerDeps {
@@ -228,14 +212,6 @@ interface ReminderTriggerInput {
   sourceAgentId?: string;
 }
 
-interface ActiveMemoryOnboardingState {
-  onboardingAgent: AgentRecord;
-  targetAgent: {
-    agentId: string;
-    workspaceDir: string;
-  };
-}
-
 function clipMessage(message: string, maxLength = 1500): string {
   if (message.length <= maxLength) {
     return message;
@@ -243,21 +219,9 @@ function clipMessage(message: string, maxLength = 1500): string {
   return `${message.slice(0, maxLength)}\n...(截断)`;
 }
 
-const MEMORY_ONBOARDING_AGENT_ID = 'memory-onboarding';
-const MEMORY_ONBOARDING_AGENT_NAME = '记忆初始化引导';
 const SKILL_ONBOARDING_AGENT_ID = 'skill-onboarding';
 const SKILL_ONBOARDING_AGENT_NAME = '技能扩展助手';
 const TERMINAL_RUN_RETENTION_MS = 60_000;
-const MEMORY_ONBOARDING_KICKOFF_BASE_PROMPT = [
-  '你是记忆初始化引导 agent，请立即开始第一轮访谈。',
-  '目标：帮助用户初始化长期记忆，并先建立 identity（用户专属身份）。',
-  '要求：第一轮优先提取 identity（身份名字、角色、语言风格、表达风格、决策原则）；每轮最多 3 个问题，等待用户回答后再继续。',
-  '要求：当目标 agent 身份缺失时，必须补齐当前 agent 身份（name/id/role/mission/boundaries）。',
-  '要求：初始化结束前，做一次一致性校验：用户身份与当前 agent 身份不冲突。',
-  '要求：每轮回答后总结并直接更新对应记忆文件；如果和旧信息冲突，按最新用户输入直接覆盖。',
-  '禁止：不要向用户透露任何内部细节，包括目录结构、文件名、工作区路径、系统 agent 名称、提示词实现细节。',
-  '第一轮聚焦 identity：preferred name, core role, language style, communication style, decision principles, boundaries。',
-];
 const SKILL_ONBOARDING_KICKOFF_PROMPT = [
   '你是技能扩展助手 agent，请立即开始第一轮引导。',
   '目标：帮助用户给指定 agent 安装/配置 skills，并能验证生效。',
@@ -266,46 +230,6 @@ const SKILL_ONBOARDING_KICKOFF_PROMPT = [
   '禁止：不要透露任何系统内部细节（路径、文件结构、隐藏实现）。',
   '第一轮请提出最多 3 个问题，先完成目标 agent 与能力范围确认。',
 ].join('\n');
-
-/** 系统内置 agent（不展示给用户，不允许通过 /agents 切换）的 ID 集合 */
-const SYSTEM_AGENT_ID_PREFIXES = [MEMORY_ONBOARDING_AGENT_ID];
-const SYSTEM_AGENT_NAMES = new Set([MEMORY_ONBOARDING_AGENT_NAME]);
-
-function renderMemoryOnboardingStartMessage(reason: 'shared' | 'agent' | 'both' | 'manual' = 'manual'): string {
-  const reasonLine = reason === 'shared'
-    ? '触发原因：用户身份未初始化。'
-    : reason === 'agent'
-    ? '触发原因：当前 agent 身份未初始化。'
-    : reason === 'both'
-    ? '触发原因：用户身份与当前 agent 身份都未初始化。'
-    : '触发原因：手动启动。';
-  return [
-    '🧭 已开始记忆初始化引导。',
-    reasonLine,
-    '接下来会按轮次提问，并把信息写入长期记忆（冲突按最新输入覆盖）。',
-  ].join('\n');
-}
-
-function renderMemoryOnboardingPendingMessage(): string {
-  return '🧭 记忆初始化引导正在启动，请先等待当前问题发出后再继续回复。';
-}
-
-function renderMemoryOnboardingResumeMessage(): string {
-  return '🧭 记忆初始化已在进行中，请继续回答当前问题即可。';
-}
-
-function renderMemoryOnboardingSuggestion(reason: 'shared' | 'agent' | 'both'): string {
-  const reasonLine = reason === 'shared'
-    ? '检测到用户身份尚未初始化。'
-    : reason === 'agent'
-    ? '检测到当前 agent 身份尚未初始化。'
-    : '检测到用户身份和当前 agent 身份都尚未初始化。';
-  return [
-    `🧭 ${reasonLine}`,
-    '当前不会自动劫持到隐藏初始化 agent，先继续按当前 agent 执行。',
-    '如需补齐初始化，请手动执行 `/agent init-memory`。',
-  ].join('\n');
-}
 
 function renderSkillOnboardingStartMessage(agent: { name: string; agentId: string; workspaceDir: string }): string {
   return [
@@ -321,16 +245,6 @@ function renderSkillOnboardingResumeMessage(agent: { name: string; agentId: stri
     `工作区：${agent.workspaceDir}`,
     '该助手已有进行中的会话，请继续描述目标能力。',
   ].join('\n');
-}
-
-function isSystemAgentId(agentId: string): boolean {
-  return SYSTEM_AGENT_ID_PREFIXES.some((prefix) => agentId === prefix || agentId.startsWith(`${prefix}-`));
-}
-
-function isSystemAgentRecord(agent: { agentId: string; name?: string }): boolean {
-  const byId = isSystemAgentId(agent.agentId);
-  const byName = typeof agent.name === 'string' && SYSTEM_AGENT_NAMES.has(agent.name.trim());
-  return byId || byName;
 }
 
 function resolveAgentWorkdir(agent: { agentId: string; workspaceDir: string }): string {
@@ -376,8 +290,8 @@ function sanitizeOnboardingText(text: string): string {
   const mdFileLike = /`[^`\n]+\.md`/g;
   return text
     .replace(pathLike, '`[内部路径]`')
-    .replace(mdFileLike, '`[记忆文件]`')
-    .replace(/shared-memory|user\.md|soul\.md|memory\/|AGENTS\.md|agent\.md|profile\.md|preferences\.md|projects\.md|relationships\.md|decisions\.md|open-loops\.md/gi, '长期记忆');
+    .replace(mdFileLike, '`[内部文件]`')
+    .replace(/\bAGENTS\.md\b/gi, '内部配置');
 }
 
 type ReplyMode = 'audio';
@@ -421,9 +335,6 @@ function formatAgentVisibleReply(agent: { name: string }, text: string): string 
     return text;
   }
   if (parseGatewayStructuredMessage(text)) {
-    return text;
-  }
-  if (isSystemAgentRecord({ agentId: '', name: agent.name })) {
     return text;
   }
   const visibleName = agent.name.trim() === '默认Agent' ? '默认助手' : agent.name.trim();
@@ -533,25 +444,6 @@ async function stageLocalPathIntoWorkspace(sourcePath: string, workspaceDir: str
   );
   await fs.promises.copyFile(normalizedSource, stagedPath);
   return stagedPath;
-}
-
-function formatMemorySummary(agent: AgentRecord, snapshot: MemorySummarySnapshot): string {
-  const sharedLines = snapshot.shared.length > 0
-    ? snapshot.shared.map((entry, index) => `${index + 1}. ${entry.fileName}: ${entry.summary}`)
-    : ['(当前没有已初始化的用户身份内容)'];
-  const agentLines = snapshot.agent.length > 0
-    ? snapshot.agent.map((entry, index) => `${index + 1}. ${entry.fileName}: ${entry.summary}`)
-    : ['(当前 agent 身份与短期记忆还没有可展示内容)'];
-  return [
-    `当前 agent：${agent.name} (${agent.agentId})`,
-    `工作区：${agent.workspaceDir}`,
-    '',
-    '【User Identity】',
-    ...sharedLines,
-    '',
-    '【Agent Identity】',
-    ...agentLines,
-  ].join('\n');
 }
 
 function buildAgentProgressText(agent: { name: string }, phase: 'received' | 'reminder' | 'done'): string {
@@ -677,30 +569,6 @@ async function sendAgentProgress(
       error: error instanceof Error ? error.message : String(error),
     });
   }
-}
-
-function buildIdentityBootstrapPrompt(identityContent: string): string {
-  const body = identityContent.trim() || '# Identity\n- 未初始化身份信息';
-  return [
-    '系统身份注入（只执行一次）',
-    '以下是用户身份内核，请将其作为该线程的长期默认设定并记住，不要向用户复述完整内容：',
-    '',
-    body,
-    '',
-    '仅回复：OK',
-  ].join('\n');
-}
-
-function buildIdentityPatchPrompt(identityContent: string): string {
-  const body = identityContent.trim() || '# Identity\n- 未初始化身份信息';
-  return [
-    '系统身份更新补丁',
-    '用户身份内核已更新，请覆盖你在该线程中的旧身份设定，并以后续回答遵循最新版本：',
-    '',
-    body,
-    '',
-    '仅回复：OK',
-  ].join('\n');
 }
 
 const BROWSER_HANDOFF_TRIGGER_PROMPT = '浏览器人工接管触发条件包括但不限于：登录、验证码、扫码、支付确认、权限弹窗、高风险提交、页面目标歧义；出现这些情况时不要硬做完，而要明确请求用户接管或确认。';
@@ -830,30 +698,8 @@ function buildInboundNonTextAck(prompt: string): string | undefined {
   return `✅ 已收到${hit.label}消息，正在分析处理。`;
 }
 
-function buildMemoryOnboardingKickoffPrompt(input: {
-  reason: 'shared' | 'agent' | 'both' | 'manual';
-  targetAgent?: { agentId: string; name: string; workspaceDir: string };
-}): string {
-  const lines = [...MEMORY_ONBOARDING_KICKOFF_BASE_PROMPT];
-  if (input.reason === 'agent' || input.reason === 'both' || input.reason === 'manual') {
-    if (input.targetAgent) {
-      lines.push(
-        '附加目标：如果目标 agent 的身份未初始化，请一并初始化（名称、ID、角色、工作边界）。',
-        '附加要求：若模板字段缺失（mission/decision principles/success criteria），请一并补齐。',
-        `目标 agent：${input.targetAgent.name} (${input.targetAgent.agentId})`,
-        `目标工作区：${input.targetAgent.workspaceDir}`,
-      );
-    } else {
-      lines.push('附加目标：如果当前 agent 的身份未初始化，请一并初始化（名称、ID、角色、工作边界）。');
-    }
-  }
-  return lines.join('\n');
-}
-
 export function createChatHandler(deps: ChatHandlerDeps) {
   const userSearchOverrides = new Map<string, boolean>();
-  const onboardingKickoffInFlight = new Set<string>();
-  const activeMemoryOnboarding = new Map<string, ActiveMemoryOnboardingState>();
   const skillManager = deps.skillManager ?? new AgentSkillManager();
   const activeRunManager = new ActiveRunManager();
   const terminalRunTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -928,11 +774,8 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     agentId: string,
     threadId: string,
     lastPrompt: string | undefined,
-    boundIdentityVersion: string | undefined,
   ): void {
-    deps.sessionStore.setSession(userKey, agentId, threadId, lastPrompt, {
-      boundIdentityVersion,
-    });
+    deps.sessionStore.setSession(userKey, agentId, threadId, lastPrompt);
   }
 
   function recordSessionActivity(
@@ -947,109 +790,6 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       return;
     }
     deps.sessionStore.recordSessionActivity?.(threadId, input);
-  }
-
-  function setActiveMemoryOnboarding(
-    userKey: string,
-    onboardingAgent: AgentRecord,
-    targetAgent: { agentId: string; workspaceDir: string },
-  ): void {
-    activeMemoryOnboarding.set(userKey, {
-      onboardingAgent,
-      targetAgent,
-    });
-  }
-
-  function getActiveMemoryOnboarding(userKey: string): ActiveMemoryOnboardingState | undefined {
-    return activeMemoryOnboarding.get(userKey);
-  }
-
-  function clearActiveMemoryOnboarding(userKey: string): void {
-    activeMemoryOnboarding.delete(userKey);
-  }
-
-  function isMemoryOnboardingComplete(
-    userKey: string,
-    state: ActiveMemoryOnboardingState,
-  ): boolean {
-    if (deps.agentWorkspaceManager.isSharedMemoryEmpty(userKey)) {
-      return false;
-    }
-    if (!deps.agentWorkspaceManager.isWorkspaceIdentityEmpty) {
-      return true;
-    }
-    return !deps.agentWorkspaceManager.isWorkspaceIdentityEmpty(state.targetAgent.workspaceDir);
-  }
-
-  async function ensureIdentityBound(input: {
-    channel: Channel;
-    userId: string;
-    sessionUserKey: string;
-    agent: AgentRecord;
-    model: string | undefined;
-    threadId?: string;
-  }): Promise<{ threadId?: string; boundIdentityVersion?: string }> {
-    const { channel, userId, sessionUserKey, agent, model } = input;
-    const runner = getRunner(getCurrentProvider(sessionUserKey, agent.agentId));
-    const snapshot = deps.agentWorkspaceManager.getIdentitySnapshot
-      ? deps.agentWorkspaceManager.getIdentitySnapshot(sessionUserKey, agent.workspaceDir)
-      : deps.agentWorkspaceManager.getSharedMemorySnapshot?.(sessionUserKey);
-    if (!snapshot || isSystemAgentRecord(agent)) {
-      return {
-        threadId: input.threadId,
-        boundIdentityVersion: undefined,
-      };
-    }
-
-    let threadId = input.threadId;
-    const targetVersion = snapshot.identityVersion;
-    const state = getSessionState(sessionUserKey, agent.agentId);
-    const currentVersion = state.boundIdentityVersion;
-
-    if (!threadId) {
-      const bootstrapResult = await runner.run({
-        prompt: buildIdentityBootstrapPrompt(snapshot.identityContent),
-        model,
-        search: false,
-        workdir: resolveAgentWorkdir(agent),
-        reminderToolContext: {
-          channel,
-          userId,
-          agentId: agent.agentId,
-          dbPath: deps.reminderDbPath,
-        },
-        onThreadStarted: (startedThreadId) => {
-          persistSession(sessionUserKey, agent.agentId, startedThreadId, 'identity bootstrap', targetVersion);
-        },
-      });
-      threadId = bootstrapResult.threadId;
-      persistSession(sessionUserKey, agent.agentId, threadId, 'identity bootstrap', targetVersion);
-      return { threadId, boundIdentityVersion: targetVersion };
-    }
-
-    if (currentVersion !== targetVersion) {
-      const patchResult = await runner.run({
-        prompt: buildIdentityPatchPrompt(snapshot.identityContent),
-        threadId,
-        model,
-        search: false,
-        workdir: resolveAgentWorkdir(agent),
-        reminderToolContext: {
-          channel,
-          userId,
-          agentId: agent.agentId,
-          dbPath: deps.reminderDbPath,
-        },
-        onThreadStarted: (startedThreadId) => {
-          persistSession(sessionUserKey, agent.agentId, startedThreadId, 'identity refresh', targetVersion);
-        },
-      });
-      threadId = patchResult.threadId;
-      persistSession(sessionUserKey, agent.agentId, threadId, 'identity refresh', targetVersion);
-      return { threadId, boundIdentityVersion: targetVersion };
-    }
-
-    return { threadId, boundIdentityVersion: targetVersion };
   }
 
   async function runReminderTrigger(input: {
@@ -1077,15 +817,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     }
 
     const sessionState = getSessionState(sessionUserKey, runtimeAgent.agentId);
-    const identityBinding = await ensureIdentityBound({
-      channel,
-      userId,
-      sessionUserKey,
-      agent: runtimeAgent,
-      model: currentModel,
-      threadId: sessionState.threadId,
-    });
-    const runtimeThreadId = identityBinding.threadId;
+    const runtimeThreadId = sessionState.threadId;
     const triggerPrompt = [
       `系统定时提醒已到期（id: ${reminder.reminderId}）。`,
       `提醒内容：${reminder.message}`,
@@ -1115,7 +847,6 @@ export function createChatHandler(deps: ChatHandlerDeps) {
             runtimeAgent.agentId,
             startedThreadId,
             `⏰ ${reminder.message}`,
-            identityBinding.boundIdentityVersion,
           );
         },
         onMessage: (text) => {
@@ -1138,7 +869,6 @@ export function createChatHandler(deps: ChatHandlerDeps) {
         runtimeAgent.agentId,
         result.threadId,
         `⏰ ${reminder.message}`,
-        identityBinding.boundIdentityVersion,
       );
     } catch (error) {
       log.error('runReminderTrigger 执行失败，回退固定提醒消息', {
@@ -1188,7 +918,7 @@ ${clipMessage(prompt, 500)}
     const currentAgent = resolveRuntimeAgent(
       deps.agentWorkspaceManager,
       sessionUserKey,
-      normalizeVisibleCurrentAgent(sessionUserKey),
+      deps.sessionStore.getCurrentAgent(sessionUserKey),
     );
     const openCodeAuthSessionKey = buildOpenCodeAuthSessionKey(channel, userId, currentAgent.agentId);
     if (deps.openCodeAuthFlowManager?.has(openCodeAuthSessionKey)) {
@@ -1218,9 +948,7 @@ ${clipMessage(prompt, 500)}
     }
     const currentModel = getCurrentModel(sessionUserKey, currentAgent.agentId);
     const currentSearch = userSearchOverrides.get(sessionUserKey) ?? deps.defaultSearch;
-    // 对用户展示时，过滤掉系统内置 agent（如 memory-onboarding）
-    const allAgents = commandNeedsAgentList(prompt) ? deps.sessionStore.listAgents(sessionUserKey, { includeHidden: true }) : [];
-    const agents = allAgents.filter((a) => !isSystemAgentRecord(a));
+    const agents = commandNeedsAgentList(prompt) ? deps.sessionStore.listAgents(sessionUserKey) : [];
     const commandResult = handleUserCommand(prompt, {
       currentThreadId: existingThreadId,
       currentAgent,
@@ -1229,94 +957,6 @@ ${clipMessage(prompt, 500)}
         ? deps.sessionStore.listDetailed(sessionUserKey, currentAgent.agentId)
         : [],
     });
-
-    async function startMemoryOnboarding(
-      onboardingAgent: { agentId: string; name: string; workspaceDir: string },
-      model: string | undefined,
-      options: {
-        reason: 'shared' | 'agent' | 'both' | 'manual';
-        targetAgent?: { agentId: string; name: string; workspaceDir: string };
-      },
-    ): Promise<void> {
-      onboardingKickoffInFlight.add(sessionUserKey);
-      if (!deps.rateLimitStore.allow(sessionUserKey)) {
-        onboardingKickoffInFlight.delete(sessionUserKey);
-        await deps.sendText(channel, userId, '⏳ 初始化请求过于频繁，请稍后再试。');
-        return;
-      }
-      if (!deps.runnerEnabled) {
-        onboardingKickoffInFlight.delete(sessionUserKey);
-        await deps.sendText(channel, userId, '⚠️ 当前服务已禁用命令执行，暂时无法开始初始化访谈。');
-        return;
-      }
-
-      let lastStreamSend: Promise<void> = Promise.resolve();
-      const onboardingThreadId = deps.sessionStore.getSession(sessionUserKey, onboardingAgent.agentId);
-      try {
-        const onboardingRunner = getRunner(getCurrentProvider(sessionUserKey, onboardingAgent.agentId));
-        const result = await onboardingRunner.run({
-          prompt: buildMemoryOnboardingKickoffPrompt(options),
-          threadId: onboardingThreadId,
-          model,
-          search: false,
-          workdir: resolveAgentWorkdir(onboardingAgent),
-          reminderToolContext: {
-            channel,
-            userId,
-            agentId: onboardingAgent.agentId,
-            dbPath: deps.reminderDbPath,
-          },
-          onThreadStarted: (startedThreadId) => {
-            deps.sessionStore.setSession(sessionUserKey, onboardingAgent.agentId, startedThreadId, 'memory onboarding kickoff');
-          },
-          onMessage: (text) => {
-            const sanitized = formatAgentVisibleReply(onboardingAgent, sanitizeOnboardingText(text));
-            lastStreamSend = deps.sendText(channel, userId, sanitized).catch((err) => {
-              log.error('startMemoryOnboarding onMessage 推送失败', err);
-            });
-          },
-        });
-        await lastStreamSend;
-        deps.sessionStore.setSession(sessionUserKey, onboardingAgent.agentId, result.threadId, 'memory onboarding kickoff');
-      } catch (error) {
-        log.error('startMemoryOnboarding 执行失败', {
-          userId,
-          error: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
-        });
-        clearActiveMemoryOnboarding(sessionUserKey);
-        await deps.sendText(channel, userId, '❌ 初始化引导启动失败，请稍后重试，或发送任意消息继续。');
-      } finally {
-        onboardingKickoffInFlight.delete(sessionUserKey);
-      }
-    }
-
-    function ensureMemoryOnboardingAgent(): AgentRecord {
-      const listedAgents = deps.sessionStore.listAgents(sessionUserKey, { includeHidden: true });
-      const existing = listedAgents.find((item) => isSystemAgentRecord(item));
-      if (existing) {
-        return {
-          agentId: existing.agentId,
-          name: existing.name,
-          workspaceDir: existing.workspaceDir,
-          createdAt: existing.createdAt,
-          updatedAt: existing.updatedAt,
-        };
-      }
-
-      const workspace = deps.agentWorkspaceManager.createWorkspace({
-        userId: sessionUserKey,
-        agentName: MEMORY_ONBOARDING_AGENT_NAME,
-        existingAgentIds: listedAgents.map((item) => item.agentId),
-        template: 'memory-onboarding',
-      });
-      const agent = deps.sessionStore.createAgent(sessionUserKey, {
-        agentId: workspace.agentId,
-        name: MEMORY_ONBOARDING_AGENT_NAME,
-        workspaceDir: workspace.workspaceDir,
-      });
-      return agent;
-    }
 
     function ensureSkillOnboardingAgent(): AgentRecord {
       const listedAgents = deps.sessionStore.listAgents(sessionUserKey, { includeHidden: true });
@@ -1345,22 +985,6 @@ ${clipMessage(prompt, 500)}
       return agent;
     }
 
-    function normalizeVisibleCurrentAgent(userKey: string): AgentRecord {
-      const selected = deps.sessionStore.getCurrentAgent(userKey);
-      if (!isSystemAgentRecord(selected)) {
-        return selected;
-      }
-
-      const listedAgents = deps.sessionStore.listAgents(userKey, { includeHidden: true });
-      const customFallback = listedAgents.find((item) => !item.isDefault && !isSystemAgentRecord(item));
-      const fallback = customFallback ?? listedAgents.find((item) => !isSystemAgentRecord(item));
-      if (fallback) {
-        deps.sessionStore.setCurrentAgent(userKey, fallback.agentId);
-        return deps.sessionStore.getCurrentAgent(userKey);
-      }
-      return selected;
-    }
-
     if (commandResult.handled) {
       const commandName = (prompt.split(/\s+/, 1)[0] ?? '').toLowerCase() || '/unknown';
       async function sendCommandText(text: string): Promise<void> {
@@ -1380,7 +1004,6 @@ ${clipMessage(prompt, 500)}
         return;
       }
       if (commandResult.createAgentName) {
-        clearActiveMemoryOnboarding(sessionUserKey);
         const workspace = deps.agentWorkspaceManager.createWorkspace({
           userId: sessionUserKey,
           agentName: commandResult.createAgentName,
@@ -1397,35 +1020,12 @@ ${clipMessage(prompt, 500)}
           [
             `✅ 已创建并切换到 agent：${agent.name} (${agent.agentId})`,
             `工作区：${agent.workspaceDir}`,
-            `记忆入口：${agent.workspaceDir}/AGENTS.md`,
+            `工作区入口：${agent.workspaceDir}/AGENTS.md`,
           ].join('\n'),
         );
         return;
       }
-      if (commandResult.initMemoryAgent) {
-        const agent = ensureMemoryOnboardingAgent();
-        const onboardingThreadId = deps.sessionStore.getSession(sessionUserKey, agent.agentId);
-        if (onboardingKickoffInFlight.has(sessionUserKey) && !onboardingThreadId) {
-          await sendCommandText(renderMemoryOnboardingPendingMessage());
-          return;
-        }
-        setActiveMemoryOnboarding(sessionUserKey, agent, {
-          agentId: currentAgent.agentId,
-          workspaceDir: currentAgent.workspaceDir,
-        });
-        if (onboardingThreadId) {
-          await sendCommandText(renderMemoryOnboardingResumeMessage());
-          return;
-        }
-        await sendCommandText(renderMemoryOnboardingStartMessage('manual'));
-        await startMemoryOnboarding(agent, currentModel, {
-          reason: 'manual',
-          targetAgent: currentAgent,
-        });
-        return;
-      }
       if (commandResult.initSkillAgent) {
-        clearActiveMemoryOnboarding(sessionUserKey);
         const agent = ensureSkillOnboardingAgent();
         deps.sessionStore.setCurrentAgent(sessionUserKey, agent.agentId);
         const skillThreadId = deps.sessionStore.getSession(sessionUserKey, agent.agentId);
@@ -1574,7 +1174,6 @@ ${clipMessage(text, 500)}
           await sendCommandText('❌ 未找到目标 agent，请先发送 /agents 查看编号。');
           return;
         }
-        clearActiveMemoryOnboarding(sessionUserKey);
         deps.sessionStore.setCurrentAgent(sessionUserKey, resolved);
         const nextAgent = resolveRuntimeAgent(
           deps.agentWorkspaceManager,
@@ -1609,15 +1208,6 @@ ${clipMessage(text, 500)}
         if (commandResult.message) {
           await sendCommandText(commandResult.message);
         }
-        return;
-      }
-      if (commandResult.queryMemory) {
-        if (!deps.agentWorkspaceManager.getMemorySummary) {
-          await sendCommandText('⚠️ 当前版本未启用记忆摘要读取能力。');
-          return;
-        }
-        const snapshot = deps.agentWorkspaceManager.getMemorySummary(sessionUserKey, currentAgent.workspaceDir);
-        await sendCommandText(formatMemorySummary(currentAgent, snapshot));
         return;
       }
       if (commandResult.queryModel) {
@@ -1886,37 +1476,12 @@ ${clipMessage(text, 500)}
       return;
     }
 
-    const activeOnboarding = commandResult.nativeCodexCommand ? undefined : getActiveMemoryOnboarding(sessionUserKey);
-    const activeOnboardingThreadId = activeOnboarding
-      ? deps.sessionStore.getSession(sessionUserKey, activeOnboarding.onboardingAgent.agentId)
-      : undefined;
-    if (!commandResult.handled && activeOnboarding && onboardingKickoffInFlight.has(sessionUserKey) && !activeOnboardingThreadId) {
-      await deps.sendText(channel, userId, renderMemoryOnboardingPendingMessage());
-      return;
-    }
-
-    const isSharedMemoryEmpty = deps.agentWorkspaceManager.isSharedMemoryEmpty(sessionUserKey);
-    const isCurrentAgentIdentityEmpty = !isSystemAgentRecord(currentAgent)
-      && !!deps.agentWorkspaceManager.isWorkspaceIdentityEmpty?.(currentAgent.workspaceDir);
-    const shouldStartMemoryOnboarding = !commandResult.nativeCodexCommand && (isSharedMemoryEmpty || isCurrentAgentIdentityEmpty);
-    const onboardingReason: 'shared' | 'agent' | 'both' = isSharedMemoryEmpty && isCurrentAgentIdentityEmpty
-      ? 'both'
-      : isSharedMemoryEmpty
-      ? 'shared'
-      : 'agent';
     const shouldPushStartupHelp = !commandResult.nativeCodexCommand
-      && !existingThreadId
-      && !shouldStartMemoryOnboarding
-      && !isSystemAgentRecord(currentAgent);
+      && !existingThreadId;
     const shouldRecommendProviderSelection = !existingThreadId
-      && !isSystemAgentRecord(currentAgent)
       && !hasExplicitProviderSelection(sessionUserKey, currentAgent.agentId);
 
-    if (!activeOnboarding && shouldStartMemoryOnboarding && !existingThreadId) {
-      await deps.sendText(channel, userId, renderMemoryOnboardingSuggestion(onboardingReason));
-    }
-
-    if (!activeOnboarding && shouldPushStartupHelp) {
+    if (shouldPushStartupHelp) {
       if (shouldRecommendProviderSelection) {
         const providerHelp = handleUserCommand('/provider').queryProvider
           ? [
@@ -1948,13 +1513,7 @@ ${clipMessage(text, 500)}
 
     let sawAgentOutput = false;
     let activeRunId: string | undefined;
-    let runtimeAgent = activeOnboarding
-      ? resolveRuntimeAgent(
-          deps.agentWorkspaceManager,
-          sessionUserKey,
-          activeOnboarding.onboardingAgent,
-        )
-      : currentAgent;
+    const runtimeAgent = currentAgent;
     try {
       let lastStreamSend: Promise<void> = Promise.resolve();
       const streamId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -1965,19 +1524,8 @@ ${clipMessage(text, 500)}
       let feishuAudioOnlyMode = false;
       let runnerOutputReady = false;
       const bufferedRunnerOutputs: string[] = [];
-      const initialRuntimeThreadId = activeOnboarding
-        ? activeOnboardingThreadId
-        : existingThreadId;
-      const identityBinding = await ensureIdentityBound({
-        channel,
-        userId,
-        sessionUserKey,
-        agent: runtimeAgent,
-        model: currentModel,
-        threadId: initialRuntimeThreadId,
-      });
-      const runtimeThreadId = identityBinding.threadId;
-      const runtimeSearch = activeOnboarding ? false : currentSearch;
+      const runtimeThreadId = existingThreadId;
+      const runtimeSearch = currentSearch;
       log.debug('handleText 查询 session', {
         userId,
         agentId: runtimeAgent.agentId,
@@ -1999,13 +1547,6 @@ ${clipMessage(text, 500)}
       }
       const shouldReplyWithWeixinVoice = channel === 'weixin' && Boolean(deps.ttsService);
       const canFeishuRequestAudioReply = channel === 'feishu' && Boolean(deps.ttsService);
-      const runtimePrompt = buildOutboundMessageProtocolPrompt(
-        channel,
-        speechPrompt?.prompt ?? normalizedPrompt,
-        {
-          feishuTtsEnabled: canFeishuRequestAudioReply,
-        },
-      );
       recordSessionActivity(runtimeThreadId, {
         role: 'user',
         text: speechPrompt?.prompt ?? normalizedPrompt,
@@ -2033,7 +1574,7 @@ ${clipMessage(text, 500)}
           return;
         }
         const normalizedOutput = rewriteGatewayStructuredLocalPaths(text, runtimeWorkdir);
-        const rawVisibleOutput = activeOnboarding ? sanitizeOnboardingText(normalizedOutput) : normalizedOutput;
+        const rawVisibleOutput = normalizedOutput;
         lastAgentRawOutput = rawVisibleOutput;
         const visibleReply = extractReplyModeDirective(rawVisibleOutput);
         feishuAudioOnlyMode = visibleReply.replyMode === 'audio';
@@ -2116,7 +1657,6 @@ ${clipMessage(userVisibleOutput, 500)}
                 runtimeAgent.agentId,
                 startedThreadId,
                 prompt,
-                identityBinding.boundIdentityVersion,
               );
               activeRunManager.update(runId, {
                 threadId: startedThreadId,
@@ -2151,7 +1691,6 @@ ${clipMessage(userVisibleOutput, 500)}
                   runtimeAgent.agentId,
                   startedThreadId,
                   prompt,
-                  identityBinding.boundIdentityVersion,
                 );
               },
               onMessage: (text) => {
@@ -2196,7 +1735,7 @@ ${clipMessage(userVisibleOutput, 500)}
       if (shouldReplyWithWeixinVoice && deps.ttsService) {
         const parsed = parseCodexJsonl(result.rawOutput);
         const normalizedOutput = rewriteGatewayStructuredLocalPaths(parsed.answer, resolveAgentWorkdir(runtimeAgent));
-        const rawVisibleOutput = activeOnboarding ? sanitizeOnboardingText(normalizedOutput) : normalizedOutput;
+        const rawVisibleOutput = normalizedOutput;
         if (parseGatewayStructuredMessage(rawVisibleOutput)) {
           await deps.sendText(channel, userId, rawVisibleOutput);
         } else {
@@ -2217,7 +1756,7 @@ ${clipMessage(userVisibleOutput, 500)}
       if (canFeishuRequestAudioReply) {
         const parsed = parseCodexJsonl(result.rawOutput);
         const normalizedOutput = rewriteGatewayStructuredLocalPaths(parsed.answer, resolveAgentWorkdir(runtimeAgent));
-        const rawVisibleOutput = activeOnboarding ? sanitizeOnboardingText(normalizedOutput) : normalizedOutput;
+        const rawVisibleOutput = normalizedOutput;
         const streamedReplyDirective = extractReplyModeDirective(lastAgentRawOutput);
         const replyDirective = streamedReplyDirective.replyMode === 'audio'
           ? streamedReplyDirective
@@ -2240,7 +1779,7 @@ ${clipMessage(userVisibleOutput, 500)}
       if (feishuAudioOnlyMode && !sawAgentOutput) {
         const parsed = parseCodexJsonl(result.rawOutput);
         const normalizedOutput = rewriteGatewayStructuredLocalPaths(parsed.answer, resolveAgentWorkdir(runtimeAgent));
-        const rawVisibleOutput = activeOnboarding ? sanitizeOnboardingText(normalizedOutput) : normalizedOutput;
+        const rawVisibleOutput = normalizedOutput;
         const fallbackReply = lastAgentRawOutput || rawVisibleOutput;
         const replyDirective = extractReplyModeDirective(fallbackReply);
         if (parseGatewayStructuredMessage(replyDirective.cleanedText)) {
@@ -2296,16 +1835,12 @@ ${clipMessage(userVisibleOutput, 500)}
         runtimeAgent.agentId,
         result.threadId,
         prompt,
-        identityBinding.boundIdentityVersion,
       );
       recordSessionActivity(result.threadId, {
         role: 'assistant',
         text: lastAgentRawOutput || result.rawOutput,
         timestamp: Date.now(),
       });
-      if (activeOnboarding && isMemoryOnboardingComplete(sessionUserKey, activeOnboarding)) {
-        clearActiveMemoryOnboarding(sessionUserKey);
-      }
       log.debug('handleText session 已更新', {
         userId,
         agentId: runtimeAgent.agentId,
