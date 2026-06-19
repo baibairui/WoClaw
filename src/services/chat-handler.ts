@@ -1999,13 +1999,6 @@ ${clipMessage(text, 500)}
       }
       const shouldReplyWithWeixinVoice = channel === 'weixin' && Boolean(deps.ttsService);
       const canFeishuRequestAudioReply = channel === 'feishu' && Boolean(deps.ttsService);
-      const runtimePrompt = buildOutboundMessageProtocolPrompt(
-        channel,
-        speechPrompt?.prompt ?? normalizedPrompt,
-        {
-          feishuTtsEnabled: canFeishuRequestAudioReply,
-        },
-      );
       recordSessionActivity(runtimeThreadId, {
         role: 'user',
         text: speechPrompt?.prompt ?? normalizedPrompt,
